@@ -443,10 +443,18 @@ func (s *Server) createHubConnection(name string, creds *brokercredentials.Broke
 		}
 	}
 
-	// Determine hub endpoint
-	hubEndpoint := creds.HubEndpoint
+	// Determine hub endpoint. Live broker config (SCION_HUB_ENDPOINT env
+	// var, --hub-endpoint flag, settings.yaml) wins over the URL stored
+	// in the credentials file. Rationale: the creds-file URL is the
+	// canonical hub identity at registration time (used for re-registering
+	// or matching by broker DeriveHubName), but at runtime the operator
+	// may want to route through a local relay (e.g. corp UberProxy
+	// translator) on a different URL while keeping the same HMAC creds
+	// scoped to the same logical hub. Falling back to creds.HubEndpoint
+	// preserves prior behavior when no live override is set.
+	hubEndpoint := s.config.HubEndpoint
 	if hubEndpoint == "" {
-		hubEndpoint = s.config.HubEndpoint
+		hubEndpoint = creds.HubEndpoint
 	}
 
 	// Build hub client options
