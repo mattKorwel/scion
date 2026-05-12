@@ -79,11 +79,20 @@ func WithAuth(auth Authenticator) TransportOption {
 }
 
 // NewTransport creates a new Transport with the given base URL and options.
+//
+// The default HTTPClient honors $SCION_HUB_CA_FILE and
+// $SCION_HUB_INSECURE_SKIP_VERIFY (see HubTLSConfig). If neither is set,
+// Go's default TLS behavior (system trust + verify) applies. If
+// HubTLSConfig errors (file unreadable, etc.) the transport falls back
+// to Go's defaults; the next request will surface a TLS error itself.
+//
+// Callers that need a custom *http.Client can override via WithHTTPClient.
 func NewTransport(baseURL string, opts ...TransportOption) *Transport {
 	t := &Transport{
 		BaseURL: strings.TrimSuffix(baseURL, "/"),
 		HTTPClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout:   30 * time.Second,
+			Transport: hubHTTPTransport(),
 		},
 		UserAgent:  "scion-client/1.0",
 		MaxRetries: 0,
@@ -95,6 +104,21 @@ func NewTransport(baseURL string, opts ...TransportOption) *Transport {
 	}
 
 	return t
+}
+
+// hubHTTPTransport returns an *http.Transport based on Go's
+// DefaultTransport but with TLSClientConfig overridden when
+// $SCION_HUB_CA_FILE or $SCION_HUB_INSECURE_SKIP_VERIFY is set.
+//
+// Cloning DefaultTransport preserves Go's standard behavior (env-based
+// proxy resolution, connection pooling, dial timeouts, HTTP/2). We
+// only mutate the TLS config slot.
+func hubHTTPTransport() http.RoundTripper {
+	base := http.DefaultTransport.(*http.Transport).Clone()
+	if cfg, err := HubTLSConfig(); err == nil && cfg != nil {
+		base.TLSClientConfig = cfg
+	}
+	return base
 }
 
 // Do executes an HTTP request with configured behaviors.

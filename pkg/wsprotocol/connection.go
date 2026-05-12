@@ -19,11 +19,52 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 )
+
+// proxyFromEnvironmentForWS adapts http.ProxyFromEnvironment to handle
+// ws:// and wss:// URLs. The stdlib's ProxyFromEnvironment only matches
+// against the "http" and "https" schemes — for any other scheme it
+// returns (nil, nil), meaning "no proxy". Gorilla's websocket.Dialer
+// defaults Proxy to ProxyFromEnvironment, which is therefore a no-op
+// for ws/wss URLs and silently bypasses HTTP_PROXY/HTTPS_PROXY env
+// vars on every WebSocket connection.
+//
+// In a corporate-proxy environment (e.g. Google's UberProxy via
+// gosso-proxy on 127.0.0.1:18181) the result is that HTTP requests
+// route through the proxy correctly while WebSocket dials go direct,
+// fail with "network unreachable", and break the broker→hub control
+// channel for any broker that lacks direct egress to the hub.
+//
+// This wrapper rewrites ws→http and wss→https on the request URL
+// before delegating, so ProxyFromEnvironment matches against the
+// schemes it actually understands. The original gorilla request URL
+// is unaffected — we operate on a copy.
+func proxyFromEnvironmentForWS(req *http.Request) (*url.URL, error) {
+	if req.URL == nil {
+		return http.ProxyFromEnvironment(req)
+	}
+	switch req.URL.Scheme {
+	case "ws", "wss":
+	default:
+		return http.ProxyFromEnvironment(req)
+	}
+	clone := *req.URL
+	if clone.Scheme == "ws" {
+		clone.Scheme = "http"
+	} else {
+		clone.Scheme = "https"
+	}
+	reqClone := *req
+	reqClone.URL = &clone
+	return http.ProxyFromEnvironment(&reqClone)
+}
 
 // Default configuration values
 const (
@@ -326,6 +367,19 @@ func DialWithConfig(ctx context.Context, url string, headers http.Header, config
 	dialer := websocket.Dialer{
 		ReadBufferSize:  config.ReadBufferSize,
 		WriteBufferSize: config.WriteBufferSize,
+		// Proxy: gorilla's default uses http.ProxyFromEnvironment directly,
+		// which doesn't recognize ws/wss schemes and silently returns no
+		// proxy. We supply a wrapper that translates the scheme before the
+		// proxy lookup so HTTP_PROXY / HTTPS_PROXY env vars work for
+		// WebSocket dials too. See proxyFromEnvironmentForWS for details.
+		Proxy: proxyFromEnvironmentForWS,
+	}
+
+	// Honor SCION_HUB_CA_FILE / SCION_HUB_INSECURE_SKIP_VERIFY for wss://.
+	// Errors here fall through to Go's default verification; subsequent
+	// dials will surface a clear TLS error if the cert isn't trusted.
+	if cfg, err := apiclient.HubTLSConfig(); err == nil && cfg != nil {
+		dialer.TLSClientConfig = cfg
 	}
 
 	conn, resp, err := dialer.DialContext(ctx, url, headers)
