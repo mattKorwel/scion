@@ -1326,7 +1326,7 @@ func readAgentTokenFile() string {
 
 // createHubClient creates a new Hub client with proper authentication.
 // Note: hub.token and hub.apiKey are deprecated and no longer used for auth.
-// Auth priority: OAuth credentials > scion-token file > SCION_AUTH_TOKEN env > auto dev auth.
+// Auth priority: OAuth credentials > scion-token file > SCION_AUTH_TOKEN env > SCION_HUB_TOKEN env > auto dev auth.
 // Exception: for localhost endpoints, dev auth takes priority over non-dev agent tokens
 // to avoid stale scion-token files from previous remote hub connections.
 func createHubClient(settings *config.Settings, endpoint string) (hubclient.Client, error) {
@@ -1360,12 +1360,33 @@ func createHubClient(settings *config.Settings, endpoint string) (hubclient.Clie
 		}
 	}
 
-	// 3. Fallback to auto dev auth
+	// 3. Check SCION_HUB_TOKEN env (operator's bearer token to a remote hub).
+	// Mirrors cmd/hub.go:getHubClient. Without this, scion start could
+	// silently fall through to auto dev-auth even when the operator has
+	// explicitly set SCION_HUB_TOKEN to authenticate against a remote hub.
+	if !authConfigured {
+		if token := os.Getenv("SCION_HUB_TOKEN"); token != "" {
+			opts = append(opts, hubclient.WithBearerToken(token))
+			authConfigured = true
+		}
+	}
+
+	// 4. Fallback to auto dev auth
 	if !authConfigured {
 		opts = append(opts, hubclient.WithAutoDevAuth())
 	}
 
-	opts = append(opts, hubclient.WithTimeout(30*time.Second))
+	// HTTP client request timeout. This is the absolute upper bound on
+	// any single Hub HTTP call. Most calls have their own tighter
+	// per-call context.WithTimeout (heartbeats are 10s, status is 5s,
+	// etc.), but agent dispatch involves the broker pulling images
+	// from a registry — which can take several minutes for a 4 GB
+	// scion-* image on a fresh broker host. 30 seconds was the
+	// original default and routinely failed dispatch with
+	// "context deadline exceeded" while the broker was mid-pull. Bump
+	// to 5 minutes so dispatch completes; per-call timeouts still
+	// catch hung short calls.
+	opts = append(opts, hubclient.WithTimeout(5*time.Minute))
 
 	return hubclient.New(endpoint, opts...)
 }
