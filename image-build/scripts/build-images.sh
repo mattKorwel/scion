@@ -276,7 +276,7 @@ else
       --dockerfile "${dockerfile}" \
       --tags "${tags}" \
       --platforms "${PLATFORMS}" \
-      "${build_arg_flags[@]}" \
+      ${build_arg_flags[@]+"${build_arg_flags[@]}"} \
       --push "${PUSH}" \
       --load "${LOAD}"
   done
