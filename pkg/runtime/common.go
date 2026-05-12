@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	stdruntime "runtime"
 	"strings"
 	"time"
 
@@ -535,6 +536,14 @@ func expandTildeTarget(target, containerHome string) string {
 // server to bind to 0.0.0.0.
 //
 // For non-Docker runtimes or non-localhost endpoints, returns "" (no override).
+//
+// Mac (and Windows) carve-out: Docker Desktop runs containers inside a Linux
+// VM. There, --network host attaches the container to the *VM's* network
+// namespace, not the host's, so "localhost" inside the container no longer
+// reaches the Mac/Windows host. The right pattern on those platforms is the
+// default bridge driver plus host.docker.internal, which Docker Desktop wires
+// up natively. So on darwin/windows we leave host.docker.internal in place
+// and return "" (no NetworkMode override).
 func ResolveDockerNetworking(runtimeName string, env map[string]string) string {
 	if runtimeName != "docker" {
 		return ""
@@ -547,6 +556,29 @@ func ResolveDockerNetworking(runtimeName string, env map[string]string) string {
 	if ep == "" {
 		return ""
 	}
+
+	// On macOS / Windows Docker Desktop, --network host is wrong: it attaches
+	// to the embedded Linux VM, not the host. Use bridge + host.docker.internal
+	// instead. If the env was rewritten to host.docker.internal already, leave
+	// it alone — Docker Desktop's bridge handles DNS for it natively.
+	if stdruntime.GOOS == "darwin" || stdruntime.GOOS == "windows" {
+		// If the broker handed us a localhost endpoint anyway (no bridge
+		// rewrite happened), translate it in-place to host.docker.internal
+		// so the bridge container can reach the host.
+		if u, err := url.Parse(ep); err == nil {
+			host := u.Hostname()
+			if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+				for _, key := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL"} {
+					if v, ok := env[key]; ok {
+						env[key] = strings.Replace(v, host, "host.docker.internal", 1)
+					}
+				}
+			}
+		}
+		return ""
+	}
+
+	// Linux below.
 
 	// If endpoint uses the Docker bridge hostname (translated from localhost),
 	// rewrite back to localhost since host networking makes it reachable directly.
