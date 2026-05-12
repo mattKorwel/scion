@@ -18,7 +18,16 @@
 # Implements the per-image builder contract on top of `docker buildx`.
 
 BUILDER_MODE="per-image"
-BUILDX_INSTANCE="scion-builder"
+# Custom builder name for the docker-container driver path. The
+# docker-container driver is required for multi-arch (--platform with
+# multiple targets) but it isolates buildkit from the local docker daemon's
+# image store, which breaks chained per-image builds (intermediate parent
+# images written by step N can't be FROM-referenced in step N+1 without
+# pushing to a real registry). Single-arch local builds use the default
+# `docker` driver instead, which reads/writes the daemon image store
+# directly and lets chained FROM references resolve from local tags.
+BUILDX_MULTIARCH_INSTANCE="scion-builder"
+BUILDX_INSTANCE="default"
 
 builder_check() {
   if ! command -v docker >/dev/null 2>&1; then
@@ -34,11 +43,44 @@ builder_check() {
 }
 
 builder_prepare() {
+  # Pick docker-container driver only when multi-arch is requested (the docker
+  # driver doesn't support multi-platform). For single-arch builds, use a
+  # `docker` driver instance bound to the current docker context so each
+  # step's output lands in the local docker image store and is visible to
+  # the next step's FROM resolution.
+  if [[ "${PLATFORMS:-}" == *","* ]]; then
+    BUILDX_INSTANCE="${BUILDX_MULTIARCH_INSTANCE}"
+  else
+    # Find a docker-driver buildx instance whose endpoint matches the
+    # current docker context. The literally-named "default" instance is
+    # bound to the "default" docker context (unix:///var/run/docker.sock)
+    # which may not be the active one (e.g. Docker Desktop uses
+    # `desktop-linux`). Use the buildx instance whose endpoint is the
+    # active context, or fall back to "default".
+    local active_ctx
+    active_ctx="$(docker context show 2>/dev/null || echo default)"
+    if docker buildx inspect "${active_ctx}" >/dev/null 2>&1; then
+      BUILDX_INSTANCE="${active_ctx}"
+    else
+      BUILDX_INSTANCE="default"
+    fi
+  fi
+
   if [[ "${DRY_RUN:-false}" == "true" ]]; then
-    echo "[dry-run] docker buildx create --name ${BUILDX_INSTANCE} --use   # if missing"
-    echo "[dry-run] docker buildx inspect --bootstrap"
+    if [[ "${BUILDX_INSTANCE}" != "${BUILDX_MULTIARCH_INSTANCE}" ]]; then
+      echo "[dry-run] docker buildx use ${BUILDX_INSTANCE}"
+    else
+      echo "[dry-run] docker buildx create --name ${BUILDX_INSTANCE} --use   # if missing"
+      echo "[dry-run] docker buildx inspect --bootstrap"
+    fi
     return 0
   fi
+
+  if [[ "${BUILDX_INSTANCE}" != "${BUILDX_MULTIARCH_INSTANCE}" ]]; then
+    docker buildx use "${BUILDX_INSTANCE}"
+    return 0
+  fi
+
   if ! docker buildx inspect "${BUILDX_INSTANCE}" >/dev/null 2>&1; then
     echo "Creating buildx builder '${BUILDX_INSTANCE}'..."
     docker buildx create --name "${BUILDX_INSTANCE}" --use
@@ -89,7 +131,7 @@ builder_build() {
   done
 
   local arg
-  for arg in "${build_args[@]}"; do
+  for arg in ${build_args[@]+"${build_args[@]}"}; do
     cmd+=(--build-arg "${arg}")
   done
 
@@ -97,7 +139,10 @@ builder_build() {
 
   if [[ "${push}" == "true" ]]; then
     cmd+=(--push)
-  elif [[ "${load}" == "true" ]]; then
+  elif [[ "${load}" == "true" && "${BUILDX_INSTANCE}" == "${BUILDX_MULTIARCH_INSTANCE}" ]]; then
+    # The `docker` driver writes directly to the daemon image store, so
+    # --load is redundant. Only pass --load when using the
+    # docker-container driver (multi-arch path).
     cmd+=(--load)
   fi
 
