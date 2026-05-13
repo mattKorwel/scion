@@ -56,4 +56,7 @@ func init() {
 
 	// Inline config flag
 	resumeCmd.Flags().StringVar(&inlineConfigPath, "config", "", "Path to inline agent config file (YAML/JSON), or '-' for stdin")
+
+	// alteredCarbon brain scope (see start.go for details).
+	resumeCmd.Flags().StringVar(&acScope, "scope", "", "alteredCarbon brain scope to dispatch this agent against (e.g. amplify/myproj)")
 }

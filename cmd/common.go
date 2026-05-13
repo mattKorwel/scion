@@ -72,6 +72,12 @@ var (
 	enableTelemetry   bool
 	disableTelemetry  bool
 	inlineConfigPath  string
+	// acScope is the alteredCarbon brain scope this agent is dispatched
+	// against. When set, AC_DEFAULT_SCOPE is propagated into the agent
+	// container so the in-container `ac` CLI and MCP server resolve to
+	// this scope without `--scope` flags. Empty disables AC integration
+	// for the agent (no env vars, no pointer write).
+	acScope string
 )
 
 // loadInlineConfig loads a ScionConfig from the --config flag path.
@@ -460,6 +466,35 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 	if debugMode {
 		opts.Env = map[string]string{
 			"SCION_DEBUG": "1",
+		}
+	}
+
+	// alteredCarbon brain scope. Plumbed into the agent container as
+	// AC_DEFAULT_SCOPE so the in-container `ac` CLI and MCP server
+	// resolve to this scope without per-call --scope flags. Inherits
+	// from $AC_DEFAULT_SCOPE on the host when the flag is absent so
+	// shells with the env already set work transparently.
+	effectiveACScope := acScope
+	if effectiveACScope == "" {
+		effectiveACScope = os.Getenv("AC_DEFAULT_SCOPE")
+	}
+	if effectiveACScope != "" {
+		if opts.Env == nil {
+			opts.Env = make(map[string]string)
+		}
+		opts.Env["AC_DEFAULT_SCOPE"] = effectiveACScope
+		// AC_SERVER_URL / AC_AUTH_TOKEN are passed through from the
+		// operator's host shell when present. Empty values mean "fall
+		// back to whatever the agent's scion-agent.yaml declares" —
+		// in particular, scion-agent.yaml can declare these with
+		// empty values to opt into implicit host-env passthrough at
+		// agent-start time. We deliberately don't error if they're
+		// unset on the host; AC integration is best-effort.
+		if v := os.Getenv("AC_SERVER_URL"); v != "" {
+			opts.Env["AC_SERVER_URL"] = v
+		}
+		if v := os.Getenv("AC_AUTH_TOKEN"); v != "" {
+			opts.Env["AC_AUTH_TOKEN"] = v
 		}
 	}
 

@@ -73,4 +73,11 @@ func init() {
 	// Inline config flag
 	startCmd.Flags().StringVar(&inlineConfigPath, "config", "", "Path to inline agent config file (YAML/JSON), or '-' for stdin")
 
+	// alteredCarbon brain scope. When set, AC_DEFAULT_SCOPE is
+	// propagated into the agent container so the in-container `ac` CLI
+	// and MCP server resolve to this scope without per-call --scope
+	// flags. Falls back to $AC_DEFAULT_SCOPE on the operator's shell
+	// when the flag is absent.
+	startCmd.Flags().StringVar(&acScope, "scope", "", "alteredCarbon brain scope to dispatch this agent against (e.g. amplify/myproj)")
+
 }
