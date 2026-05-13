@@ -891,6 +891,12 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			if groveID := opts.Env["SCION_GROVE_ID"]; groveID != "" {
 				l["scion.grove_id"] = groveID
 			}
+			// Stamp the alteredCarbon scope (if any) as a label so
+			// Stop()/Delete() can look it up later and mark the AC
+			// pointer ended without needing the scope passed back in.
+			if scope := resolveBrainScopeFromOpts(opts); scope != "" {
+				l["scion.ac_scope"] = scope
+			}
 			return l
 		}(),
 		Annotations: map[string]string{
@@ -937,6 +943,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 				a.HarnessConfigRevision = harnessConfigRevision
 				a.HarnessAuth = opts.HarnessAuth
 				a.Profile = profileName
+				notifyBrainAgentStarted(ctx, opts, &a)
 				return &a, nil
 			}
 		}
@@ -944,7 +951,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 
 	// Container ID returned but not found in listing — it may have exited and been removed
 	warnings = append(warnings, "Container started but could not be verified as running")
-	return &api.AgentInfo{
+	info := &api.AgentInfo{
 		ID:                    id,
 		Name:                  opts.Name,
 		Phase:                 status,
@@ -954,7 +961,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		HarnessConfigRevision: harnessConfigRevision,
 		HarnessAuth:           opts.HarnessAuth,
 		Profile:               profileName,
-	}, nil
+	}
+	notifyBrainAgentStarted(ctx, opts, info)
+	return info, nil
 }
 
 // extractWorkspaceFromVolumes finds a volume mounted to /workspace and returns its source path.

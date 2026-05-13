@@ -102,13 +102,27 @@ func (m *AgentManager) Stop(ctx context.Context, agentID string) error {
 			if a.Name == agentID || a.ContainerID == agentID ||
 				strings.TrimPrefix(a.Name, "/") == agentID ||
 				strings.EqualFold(a.Name, agentID) {
-				return m.Runtime.Stop(ctx, a.ContainerID)
+				if stopErr := m.Runtime.Stop(ctx, a.ContainerID); stopErr != nil {
+					return stopErr
+				}
+				// Best-effort AC pointer update (no-op if AC isn't
+				// configured or the agent had no scope label). Runs
+				// after Runtime.Stop succeeds so we never claim the
+				// agent ended when it actually didn't.
+				notifyBrainAgentStopped(ctx, a.Labels["scion.ac_scope"])
+				return nil
 			}
 		}
 	}
 	// Fallback: agentID may already be a container ID, or the list
-	// failed — pass it through directly.
-	return m.Runtime.Stop(ctx, agentID)
+	// failed — pass it through directly. We don't know the scope in
+	// this path, so the AC pointer update relies on the host
+	// $AC_DEFAULT_SCOPE fallback inside notifyBrainAgentStopped.
+	if stopErr := m.Runtime.Stop(ctx, agentID); stopErr != nil {
+		return stopErr
+	}
+	notifyBrainAgentStopped(ctx, "")
+	return nil
 }
 
 func (m *AgentManager) Delete(ctx context.Context, agentID string, deleteFiles bool, grovePath string, removeBranch bool) (bool, error) {
