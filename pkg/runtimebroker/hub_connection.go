@@ -115,6 +115,11 @@ func (hc *HubConnection) Start(ctx context.Context, server *Server) error {
 			)
 			hb.auxiliaryManagers = server.getAuxiliaryManagers
 			hb.SetVersion(server.version)
+			// Attach the broker's alteredCarbon brain client (if AC
+			// is configured via $AC_SERVER_URL on the broker host)
+			// so each tick also dispatches a per-agent AC heartbeat
+			// for agents carrying a `scion.ac_scope` label. nil-safe.
+			hb.SetBrain(server.getOrInitBrain())
 			hc.mu.Lock()
 			hc.Heartbeat = hb
 			hc.mu.Unlock()

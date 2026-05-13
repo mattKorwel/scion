@@ -23,6 +23,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/brain"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
 
@@ -60,6 +61,12 @@ type HeartbeatService struct {
 	groveFilter       func(groveID string) bool // returns true if this grove belongs to this hub
 	log               *slog.Logger
 
+	// brainClient, when non-nil, receives a Heartbeat() call for
+	// every agent that carries a `scion.ac_scope` label on each
+	// tick. Set via SetBrain. nil means alteredCarbon integration
+	// is disabled for this broker.
+	brainClient *brain.Brain
+
 	mu     sync.Mutex
 	stopCh chan struct{}
 	doneCh chan struct{}
@@ -87,6 +94,17 @@ func NewHeartbeatService(client hubclient.RuntimeBrokerService, brokerID string,
 // SetVersion sets the broker version reported in heartbeats.
 func (s *HeartbeatService) SetVersion(version string) {
 	s.version = version
+}
+
+// SetBrain installs an alteredCarbon brain client that receives a
+// best-effort Heartbeat() call per agent (keyed by the agent's
+// `scion.ac_scope` label) every tick. nil disables.
+//
+// Pass an enabled (b.Enabled() == true) *brain.Brain or nil; the
+// service treats both correctly. Must be called before Start() to
+// take effect on the first tick.
+func (s *HeartbeatService) SetBrain(b *brain.Brain) {
+	s.brainClient = b
 }
 
 // Start begins sending heartbeats in the background.
@@ -163,9 +181,50 @@ func (s *HeartbeatService) run(ctx context.Context) {
 }
 
 // sendHeartbeat sends a single heartbeat to the Hub.
+//
+// As a side-effect, also dispatches a per-agent heartbeat to the
+// alteredCarbon brain (when SetBrain has installed one) for every
+// agent carrying a `scion.ac_scope` label. AC heartbeat failures
+// are debug-logged and do not affect the hub heartbeat result.
 func (s *HeartbeatService) sendHeartbeat(ctx context.Context) error {
 	heartbeat := s.buildHeartbeat()
+
+	// Best-effort AC dispatch. Run before the hub call so an
+	// unreachable hub doesn't block AC's freshness; both calls run
+	// inside the same outer ticker, so AC sees roughly the same
+	// cadence as the hub regardless.
+	if s.brainClient != nil && s.brainClient.Enabled() {
+		s.dispatchBrainHeartbeats(ctx)
+	}
+
 	return s.client.Heartbeat(ctx, s.brokerID, heartbeat)
+}
+
+// dispatchBrainHeartbeats walks the broker's agent list (already
+// the source of buildHeartbeat()'s grove counts) and pings AC for
+// each one carrying a `scion.ac_scope` label. The set of in-flight
+// AC heartbeats per tick is bounded by the live agent count.
+//
+// Errors per scope are logged at debug level; we never let one
+// agent's brain dispatch failure affect the rest.
+func (s *HeartbeatService) dispatchBrainHeartbeats(ctx context.Context) {
+	if s.manager == nil {
+		return
+	}
+	agents, err := s.manager.List(ctx, nil)
+	if err != nil {
+		s.log.Debug("brain: list agents for heartbeat failed", "error", err)
+		return
+	}
+	for _, ag := range agents {
+		scope := ag.Labels["scion.ac_scope"]
+		if scope == "" {
+			continue
+		}
+		if err := s.brainClient.Heartbeat(ctx, scope); err != nil {
+			s.log.Debug("brain: heartbeat failed", "scope", scope, "error", err)
+		}
+	}
 }
 
 // buildHeartbeat constructs the heartbeat payload from current state.

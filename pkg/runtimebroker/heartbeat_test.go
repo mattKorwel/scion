@@ -17,12 +17,16 @@ package runtimebroker
 import (
 	"context"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/brain"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
 
@@ -447,5 +451,97 @@ func TestHeartbeatService_IncludesAuxiliaryRuntimes(t *testing.T) {
 	}
 	if _, ok := agentMap["k8s-agent"]; !ok {
 		t.Error("Expected k8s-agent from auxiliary runtime in heartbeat")
+	}
+}
+
+// TestHeartbeatService_DispatchesBrainHeartbeats verifies that when a
+// *brain.Brain is installed via SetBrain, sendHeartbeat fans out a
+// per-agent AC heartbeat for every agent carrying a `scion.ac_scope`
+// label. Agents without the label are skipped.
+func TestHeartbeatService_DispatchesBrainHeartbeats(t *testing.T) {
+	// Track AC heartbeat hits keyed by scope so we can assert the
+	// correct subset of agents reached the fake AC server.
+	var hits sync.Map // scope -> int
+	acSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Path shape: /v1/heartbeat/{scope...}
+		const prefix = "/v1/heartbeat/"
+		if !strings.HasPrefix(r.URL.Path, prefix) {
+			http.NotFound(w, r)
+			return
+		}
+		scope := strings.TrimPrefix(r.URL.Path, prefix)
+		v, _ := hits.LoadOrStore(scope, 0)
+		hits.Store(scope, v.(int)+1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer acSrv.Close()
+
+	b, err := brain.New(brain.Config{URL: acSrv.URL})
+	if err != nil {
+		t.Fatalf("brain.New: %v", err)
+	}
+
+	mgr := &heartbeatMockManager{
+		agents: []api.AgentInfo{
+			{Name: "agent-a", Labels: map[string]string{"scion.ac_scope": "amplify/myproj"}},
+			{Name: "agent-b", Labels: map[string]string{"scion.ac_scope": "byo/other"}},
+			{Name: "agent-c"}, // no scope label, must be skipped
+		},
+	}
+	hubClient := &mockRuntimeBrokerService{}
+	svc := NewHeartbeatService(hubClient, "test-broker", time.Hour, mgr, nil, slog.Default())
+	svc.SetBrain(b)
+
+	// Single tick via sendHeartbeat (avoids the goroutine timing
+	// flake that would come from Start/Stop).
+	if err := svc.sendHeartbeat(context.Background()); err != nil {
+		t.Fatalf("sendHeartbeat: %v", err)
+	}
+
+	// Both labeled scopes should have been pinged exactly once.
+	for _, scope := range []string{"amplify/myproj", "byo/other"} {
+		v, ok := hits.Load(scope)
+		if !ok {
+			t.Errorf("scope %q: expected 1 hit, got none", scope)
+			continue
+		}
+		if got := v.(int); got != 1 {
+			t.Errorf("scope %q: expected 1 hit, got %d", scope, got)
+		}
+	}
+
+	// Unlabeled agent must not have caused any extra hits — total
+	// distinct paths == 2.
+	count := 0
+	hits.Range(func(_, _ any) bool { count++; return true })
+	if count != 2 {
+		t.Errorf("distinct scopes pinged: got %d want 2", count)
+	}
+}
+
+// TestHeartbeatService_NoBrainDispatchWhenDisabled verifies that
+// without SetBrain (the default state) no AC requests fly even if
+// agents carry scope labels. AC integration must be opt-in.
+func TestHeartbeatService_NoBrainDispatchWhenDisabled(t *testing.T) {
+	hits := 0
+	acSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer acSrv.Close()
+	// Note: we deliberately do NOT call SetBrain here.
+
+	mgr := &heartbeatMockManager{
+		agents: []api.AgentInfo{
+			{Name: "agent-a", Labels: map[string]string{"scion.ac_scope": "amplify/myproj"}},
+		},
+	}
+	svc := NewHeartbeatService(&mockRuntimeBrokerService{}, "test-broker", time.Hour, mgr, nil, slog.Default())
+
+	if err := svc.sendHeartbeat(context.Background()); err != nil {
+		t.Fatalf("sendHeartbeat: %v", err)
+	}
+	if hits != 0 {
+		t.Errorf("AC hits without SetBrain: got %d want 0", hits)
 	}
 }

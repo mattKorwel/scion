@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/brain"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -181,6 +182,14 @@ type Server struct {
 
 	// Multi-key auth middleware
 	brokerAuthMiddleware *MultiKeyBrokerAuthMiddleware
+
+	// alteredCarbon brain client. Constructed lazily from
+	// $AC_SERVER_URL on first access via getOrInitBrain. nil-safe:
+	// brain.Brain methods short-circuit to ErrDisabled when AC isn't
+	// configured. Per-server (not per-hub-connection) so a single
+	// HTTP client serves every connection's heartbeat dispatch.
+	brainOnce sync.Once
+	brain     *brain.Brain
 
 	// Credential watching (watches MultiStore directory)
 	multiCredStore  *brokercredentials.MultiStore
@@ -1625,4 +1634,33 @@ func extractAction(r *http.Request, prefix string) (id, action string) {
 		action = parts[1]
 	}
 	return
+}
+
+// getOrInitBrain returns the broker's alteredCarbon brain client,
+// constructing it on first call from $AC_SERVER_URL / $AC_AUTH_TOKEN.
+// Returns nil when AC isn't configured (no AC_SERVER_URL set);
+// callers must nil-check or use brain.Brain methods which already
+// short-circuit to ErrDisabled on nil receivers.
+//
+// Idempotent and safe for concurrent use.
+func (s *Server) getOrInitBrain() *brain.Brain {
+	s.brainOnce.Do(func() {
+		url := os.Getenv("AC_SERVER_URL")
+		if url == "" {
+			return
+		}
+		b, err := brain.New(brain.Config{
+			URL:   url,
+			Token: os.Getenv("AC_AUTH_TOKEN"),
+		})
+		if err != nil {
+			// brain.ErrDisabled is the empty-URL case; we already
+			// short-circuited above. Anything else is a config bug;
+			// log and proceed without AC.
+			slog.Debug("alteredCarbon brain init failed", "error", err)
+			return
+		}
+		s.brain = b
+	})
+	return s.brain
 }
