@@ -254,6 +254,16 @@ if [[ "${BUILDER_MODE}" == "target" ]]; then
   builder_run_target "${TARGET}" "${REGISTRY}" "${TAG}" "${PUSH}"
 else
   for step in "${STEPS[@]}"; do
+    # Refresh ac binaries before scion-base bakes them in. build-ac.sh
+    # is a no-op when AC_SOURCE_DIR (default ~/dev/altered-carbon) is
+    # missing or not a real AC checkout, so this stays safe for users
+    # who don't have alteredCarbon set up. Skipped when AC_SKIP_BUILD
+    # is set, which is the escape hatch for CI hosts that don't have
+    # the AC source tree available.
+    if [[ "${step}" == "scion-base" && -z "${AC_SKIP_BUILD:-}" ]]; then
+      "$(dirname "$0")/build-ac.sh" || true
+    fi
+
     image_name="$(step_image_name "${step}")"
     dockerfile="$(step_dockerfile "${step}")"
     context_dir="$(step_context_dir "${step}")"

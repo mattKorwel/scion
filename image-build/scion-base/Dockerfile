@@ -60,6 +60,23 @@ USER root
 COPY --from=builder /usr/local/bin/scion /usr/local/bin/scion
 COPY --from=builder /usr/local/bin/sciontool /usr/local/bin/sciontool
 
+# alteredCarbon CLI + MCP server. Pre-built for the target platform
+# by image-build/scripts/build-ac.sh; that script drops binaries
+# named ac-<os>-<arch> under image-build/scion-base/_ac-bin/. The
+# dir always exists (it's checked into the build context with a
+# .gitkeep sentinel) so this COPY succeeds whether or not binaries
+# were built. The downstream RUN picks the matching arch and
+# installs it; absence of a matching binary is silent — the agent
+# image just won't have `ac`, which is the correct behavior for
+# the opt-in AC integration.
+ARG TARGETOS
+ARG TARGETARCH
+COPY image-build/scion-base/_ac-bin /tmp/ac-bin
+RUN if [ -f "/tmp/ac-bin/ac-${TARGETOS}-${TARGETARCH}" ]; then \
+      install -m 0755 "/tmp/ac-bin/ac-${TARGETOS}-${TARGETARCH}" /usr/local/bin/ac; \
+    fi && \
+    rm -rf /tmp/ac-bin
+
 # Create dev-override bin directory at highest PATH priority.
 # When SCION_DEV_BINARIES is set, this directory is bind-mounted with
 # locally-built binaries, allowing rapid iteration without image rebuilds.
