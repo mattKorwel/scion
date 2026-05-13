@@ -254,13 +254,23 @@ if [[ "${BUILDER_MODE}" == "target" ]]; then
   builder_run_target "${TARGET}" "${REGISTRY}" "${TAG}" "${PUSH}"
 else
   for step in "${STEPS[@]}"; do
-    # Refresh ac binaries before scion-base bakes them in. build-ac.sh
-    # is a no-op when AC_SOURCE_DIR (default ~/dev/altered-carbon) is
-    # missing or not a real AC checkout, so this stays safe for users
+    # Refresh AC source mirror + ac binaries before scion-base bakes
+    # them in. Both helpers are no-ops when AC_SOURCE_DIR (default
+    # ~/dev/altered-carbon) is missing, so this stays safe for users
     # who don't have alteredCarbon set up. Skipped when AC_SKIP_BUILD
     # is set, which is the escape hatch for CI hosts that don't have
     # the AC source tree available.
+    #
+    # sync-ac-src.sh keeps go.mod's `replace
+    # github.com/mattkorwel/alteredCarbon => ./image-build/scion-base/_ac-src`
+    # resolvable inside the Docker build (the same path resolves on
+    # the host because that's where the sync writes).
+    #
+    # build-ac.sh produces ac binaries under
+    # image-build/scion-base/_ac-bin/ that the Dockerfile installs
+    # at /usr/local/bin/ac for the matching arch.
     if [[ "${step}" == "scion-base" && -z "${AC_SKIP_BUILD:-}" ]]; then
+      "$(dirname "$0")/sync-ac-src.sh" || true
       "$(dirname "$0")/build-ac.sh" || true
     fi
 

@@ -199,4 +199,4 @@ require (
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
 
-replace github.com/mattkorwel/alteredCarbon => /Users/mattkorwel/dev/altered-carbon
+replace github.com/mattkorwel/alteredCarbon => ./image-build/scion-base/_ac-src

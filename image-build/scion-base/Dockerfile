@@ -28,11 +28,21 @@ ENV CGO_ENABLED=1
 ARG GIT_COMMIT
 ARG BUILD_TIME
 
-# Copy go.mod and go.sum first for better layer caching
+# Copy go.mod and go.sum first for better layer caching. The
+# replace directive points at ./image-build/scion-base/_ac-src
+# (alteredCarbon source mirror), so we need to seed the replace
+# target before `go mod download` resolves it. The full AC source
+# tree gets COPYed below alongside scion's own pkg/ — the early
+# go.mod here is just enough to satisfy the replace.
+COPY image-build/scion-base/_ac-src/go.mod image-build/scion-base/_ac-src/go.sum* ./image-build/scion-base/_ac-src/
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy source and build scion and sciontool
+# Copy source and build scion and sciontool. AC source lives under
+# the build context as image-build/scion-base/_ac-src/; the replace
+# directive in scion's go.mod resolves to ./image-build/scion-base/_ac-src
+# both on the host and in this build.
+COPY image-build/scion-base/_ac-src/ ./image-build/scion-base/_ac-src/
 COPY cmd/ ./cmd/
 COPY pkg/ ./pkg/
 COPY web/*.go ./web/

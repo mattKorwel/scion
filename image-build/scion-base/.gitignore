@@ -1,0 +1,4 @@
+# Synced/built artifacts. Tracked dirs preserved by .gitkeep stubs.
+_ac-src/*
+!_ac-src/.gitkeep
+_ac-bin/ac-*
