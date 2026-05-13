@@ -1524,9 +1524,16 @@ func isClaude(childArgs []string) bool {
 
 // scionEnvVarPrefixes lists environment variable prefixes that are written
 // to the scion-env file for shell sessions to source.
+//
+// "AC_" covers alteredCarbon brain integration (AC_DEFAULT_SCOPE,
+// AC_SERVER_URL, AC_AUTH_TOKEN, AC_BROKER). Without this entry, env
+// vars passed via `docker run -e` get lost for harnesses that re-exec
+// with a filtered environment, and `ac` CLI invocations from inside
+// tool-spawned shells fail with "no API URL configured."
 var scionEnvVarPrefixes = []string{
 	"SCION_",
 	"GITHUB_TOKEN",
+	"AC_",
 }
 
 // writeEnvFile writes critical SCION_* environment variables to a shell-sourceable
