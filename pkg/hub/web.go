@@ -131,6 +131,17 @@ type WebServerConfig struct {
 	AdminMode bool
 	// MaintenanceMessage is the custom message shown during admin mode.
 	MaintenanceMessage string
+
+	// ACServerURL is the base URL of the alteredCarbon brain server
+	// (e.g. "http://mjk-agent-server.c.googlers.com:8787"). When set,
+	// the web server proxies /api/v1/ac/* routes to it so the SPA can
+	// populate the AC Scope picker on agent-create / list / filter.
+	// Empty disables the AC proxy entirely (the routes return 503).
+	ACServerURL string
+	// ACAuthToken is the bearer token the proxy presents to AC. May
+	// be empty when AC is in dev-auth or unauthenticated mode (today's
+	// ori-server bound to a loopback / corp-fronted endpoint).
+	ACAuthToken string
 }
 
 // WebServer serves the web frontend SPA shell and static assets.
@@ -515,12 +526,43 @@ func (ws *WebServer) SetBrokerHealthProvider(p HealthProvider) {
 // MountHubAPI mounts the Hub API handler on the web server so both are
 // served on a single port. hubShutdown is called during graceful shutdown
 // to clean up Hub resources (control channels, broker auth, etc.).
+//
+// Also mounts the AC scope proxy (/api/v1/ac/*) when the WebServerConfig
+// declares an ACServerURL. The AC routes are registered BEFORE the
+// generic /api/v1/ catch-all so Go's ServeMux longest-prefix matcher
+// routes them to the proxy instead of the hub handler. AC isn't part
+// of the hub's domain model; the proxy is a thin shim that lets the
+// browser reach the AC brain over corp networks via the hub's own
+// session-bridged TLS.
 func (ws *WebServer) MountHubAPI(hubHandler http.Handler, hubShutdown func(context.Context) error) {
 	ws.hubHandler = hubHandler
 	ws.hubShutdown = hubShutdown
+
+	// Mount AC proxy first when configured. Order matters here: if
+	// we mount the /api/v1/ catch-all first and then add /api/v1/ac/,
+	// Go's ServeMux still picks the longer prefix correctly because
+	// patterns aren't ordered, but it's clearer to read top-down.
+	// Cache TTL = 30s; AC scope listings change rarely (operator
+	// creates scopes occasionally) and the UI re-fetches on every
+	// agent-create page load. 30s keeps fan-out low while still
+	// showing newly-created scopes within an acceptable window.
+	if ws.config.ACServerURL != "" {
+		acClient := NewHTTPACClient(ws.config.ACServerURL, ws.config.ACAuthToken)
+		acProxy := NewACProxy(acClient, 30*time.Second)
+		// Wrap in session-to-bearer middleware so the AC proxy
+		// participates in the same auth flow as the rest of /api/v1/.
+		// (Today the AC backend doesn't enforce auth, but when it
+		// does the proxy will need a way to inject the operator's
+		// identity; the middleware is the natural seam.)
+		acHandler := http.NewServeMux()
+		acProxy.Register(acHandler)
+		ws.mux.Handle("/api/v1/ac/", ws.sessionToBearerMiddleware(acHandler))
+	}
+
 	// Register the Hub API handler on the mux. Go's ServeMux uses
 	// longest-prefix matching, so /api/v1/ takes priority over /
-	// (the SPA catch-all).
+	// (the SPA catch-all), and /api/v1/ac/ (registered above) takes
+	// priority over /api/v1/.
 	ws.mux.Handle("/api/v1/", ws.sessionToBearerMiddleware(hubHandler))
 }
 

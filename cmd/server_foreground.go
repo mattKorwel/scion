@@ -942,6 +942,17 @@ func initWebServer(cfg *config.GlobalConfig, hubSrv *hub.Server, devAuthToken st
 		webAdminEmails = cfg.Hub.AdminEmails
 	}
 
+	// alteredCarbon brain proxy config. When AC_SERVER_URL is set in
+	// the hub's environment, the web server mounts /api/v1/ac/* and
+	// proxies scope-list / scope-create calls to AC. This is how the
+	// agent-create page populates its AC Scope dropdown without
+	// requiring the browser to reach the corp-hosted AC brain
+	// directly. AC_AUTH_TOKEN is optional (today's ori-server in
+	// dev-auth mode accepts unauthenticated requests on its bound
+	// interface; production AC will need a token).
+	acServerURL := os.Getenv("AC_SERVER_URL")
+	acAuthToken := os.Getenv("AC_AUTH_TOKEN")
+
 	webCfg := hub.WebServerConfig{
 		Port:               webPort,
 		Host:               webHost,
@@ -954,6 +965,8 @@ func initWebServer(cfg *config.GlobalConfig, hubSrv *hub.Server, devAuthToken st
 		AdminEmails:        webAdminEmails,
 		AdminMode:          adminMode,
 		MaintenanceMessage: maintenanceMessage,
+		ACServerURL:        acServerURL,
+		ACAuthToken:        acAuthToken,
 	}
 	webSrv := hub.NewWebServer(webCfg)
 	webSrv.SetRequestLogger(requestLogger)
