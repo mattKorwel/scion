@@ -832,3 +832,190 @@ func phaseFromContainerStatus(status string) string {
 		return "created"
 	}
 }
+
+// corpHostSuffixes lists the DNS suffixes that indicate a host is reachable
+// only via the corp UberProxy fronted by gosso-proxy. Used by
+// EnsureCorpProxyEnv to decide whether to inject HTTP_PROXY into agent
+// containers so the in-container `ac` CLI can reach the AC brain server.
+//
+// Keep narrow: extending this to '.google.com' or similar would also match
+// public-internet hosts (e.g. google.com itself) that don't need a proxy.
+// The two suffixes here cover all internal Google corp services we expect
+// AC to be hosted under.
+var corpHostSuffixes = []string{
+	".c.googlers.com",     // cloudtop / sandman / borg / managed-VM hostnames
+	".googleplex.com",     // memegen, moma, b/, internal web apps
+	".corp.google.com",    // corp intranet hostnames
+	".sandbox.google.com", // sandboxed services
+}
+
+// isCorpHost reports whether the given URL points at a corp UberProxy-fronted
+// hostname (per corpHostSuffixes). Returns false on parse errors or empty input.
+func isCorpHost(rawURL string) bool {
+	if rawURL == "" {
+		return false
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	if host == "" {
+		return false
+	}
+	for _, suffix := range corpHostSuffixes {
+		if strings.HasSuffix(host, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+// EnsureCorpProxyEnv injects HTTP_PROXY / HTTPS_PROXY / NO_PROXY into the
+// agent container's env so the in-container `ac` CLI (and MCP server) can
+// reach the alteredCarbon brain server when it lives on a corp host.
+//
+// Why this exists: AC_SERVER_URL typically points at a cloudtop
+// (e.g. http://mjk-agent-server.c.googlers.com:8787). From inside an
+// agent container, that host is unreachable directly — corp DNS isn't
+// resolvable in the container, and even if it were, UberProxy demands
+// SSO. The operator solves this on the host with gosso-proxy listening
+// on 127.0.0.1:18181. Containers need the same proxy translated for
+// their network namespace.
+//
+// The injection only happens when:
+//   - opts.Env has AC_SERVER_URL set, AND
+//   - that URL points at a corp suffix (per isCorpHost), AND
+//   - the agent doesn't already have HTTP_PROXY set (caller can opt out
+//     by pre-setting the env, e.g. for an in-container test).
+//
+// The proxy URL is read from the host's HTTP_PROXY / HTTPS_PROXY env. If
+// neither is set, we fall back to the canonical 127.0.0.1:18181 — same
+// default gosso-proxy ships with. The URL is then translated for the
+// container network namespace using the same rule as the hub endpoint:
+//
+//   - mac/windows Docker Desktop: 127.0.0.1 -> host.docker.internal
+//   - linux docker (host network mode): leave 127.0.0.1 in place
+//   - linux docker (bridge): 127.0.0.1 -> host.docker.internal (and the
+//     caller is expected to add --add-host=host.docker.internal:host-gateway
+//     via BridgeExtraHosts, which already runs unconditionally when any
+//     env mentions host.docker.internal)
+//   - podman: 127.0.0.1 -> host.containers.internal (podman's native name)
+//
+// NO_PROXY is set so the agent's hub traffic (which already goes direct
+// or through a different path) doesn't loop through gosso-proxy, which
+// would either fail (gosso-proxy isn't a general-purpose forward proxy
+// for non-corp hosts) or add unnecessary latency. We blanket-exempt
+// localhost + the docker bridge names + the hub host if known.
+//
+// Returns true if it modified env, false otherwise. Pure function over
+// env; no I/O beyond reading host env vars.
+func EnsureCorpProxyEnv(runtimeName string, env map[string]string) bool {
+	acURL := env["AC_SERVER_URL"]
+	if !isCorpHost(acURL) {
+		return false
+	}
+	// Don't clobber an explicit operator/template setting.
+	if env["HTTP_PROXY"] != "" || env["http_proxy"] != "" {
+		return false
+	}
+
+	// Resolve the host-side proxy URL.
+	hostProxy := os.Getenv("HTTP_PROXY")
+	if hostProxy == "" {
+		hostProxy = os.Getenv("HTTPS_PROXY")
+	}
+	if hostProxy == "" {
+		// gosso-proxy default; matches what the fleet ships.
+		hostProxy = "http://127.0.0.1:18181"
+	}
+
+	// Translate for the container's network namespace.
+	containerProxy := translateProxyForContainer(runtimeName, hostProxy)
+
+	if env == nil {
+		// Defensive: caller should have inited; do it here to be safe.
+		// (Cannot actually assign to map[string]string nil receiver, so this
+		// branch never triggers in practice — opts.Env is always inited by
+		// pkg/agent/run.go before calling us.)
+		return false
+	}
+
+	env["HTTP_PROXY"] = containerProxy
+	env["HTTPS_PROXY"] = containerProxy
+	// http_proxy / https_proxy lowercase variants for tools (curl, etc.)
+	// that read the lowercase form. Go's net/http reads both, but legacy
+	// clients vary.
+	env["http_proxy"] = containerProxy
+	env["https_proxy"] = containerProxy
+
+	// NO_PROXY: never proxy localhost / loopback / the docker bridge hostnames.
+	// The hub endpoint (if known) gets exempted too — hub traffic goes through
+	// a different path (or the same SCION_HUB_ENDPOINT already points at
+	// localhost/host.docker.internal which is in the no-proxy list).
+	noProxyParts := []string{
+		"localhost",
+		"127.0.0.1",
+		"::1",
+		"host.docker.internal",
+		"host.containers.internal",
+	}
+	// Respect any pre-existing NO_PROXY by appending rather than overwriting.
+	if existing := env["NO_PROXY"]; existing != "" {
+		noProxyParts = append(noProxyParts, existing)
+	} else if existing := env["no_proxy"]; existing != "" {
+		noProxyParts = append(noProxyParts, existing)
+	}
+	noProxy := strings.Join(noProxyParts, ",")
+	env["NO_PROXY"] = noProxy
+	env["no_proxy"] = noProxy
+
+	return true
+}
+
+// translateProxyForContainer rewrites a host-side proxy URL so the container
+// can dial it across the network-namespace boundary. Mirrors the logic
+// ResolveDockerNetworking applies to the hub endpoint, but in the opposite
+// direction: hub is reached from host -> container (we make container-side
+// localhost work); proxy is reached from container -> host (we make
+// container reach host's loopback).
+//
+// On linux with host networking, container "localhost" IS the host's
+// localhost, so no rewrite is needed. We don't know here whether the
+// caller will end up using host mode, so we use the safe-everywhere
+// translation (host.docker.internal / host.containers.internal). On
+// linux with host mode, the bridge hostname still resolves correctly
+// via /etc/hosts when BridgeExtraHosts is applied.
+//
+// Returns the input unchanged if it doesn't reference a loopback host.
+//
+// IPv6 note: url.Hostname() strips the brackets from `[::1]`, so we have
+// to use url.Host (which keeps brackets+port) when searching/replacing
+// in the URL string to avoid leaving stray brackets in the output.
+func translateProxyForContainer(runtimeName, proxyURL string) string {
+	u, err := url.Parse(proxyURL)
+	if err != nil {
+		return proxyURL
+	}
+	host := u.Hostname()
+	if host != "localhost" && host != "127.0.0.1" && host != "::1" {
+		// Already a non-loopback hostname; container can reach it as-is.
+		return proxyURL
+	}
+
+	// Podman has its own bridge hostname.
+	target := "host.docker.internal"
+	if runtimeName == "podman" {
+		target = "host.containers.internal"
+	}
+
+	// For IPv6, url.Host is `[::1]:port`; we need to replace the bracketed
+	// form so we don't leave dangling brackets in the output. For IPv4 and
+	// "localhost", url.Hostname() and the in-string form match, so a plain
+	// hostname replace works.
+	if host == "::1" {
+		// Replace `[::1]` literal in the URL string.
+		return strings.Replace(proxyURL, "["+host+"]", target, 1)
+	}
+	return strings.Replace(proxyURL, host, target, 1)
+}

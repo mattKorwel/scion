@@ -662,6 +662,19 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		opts.Env["SCION_NETWORK_MODE"] = dockerNetworkMode
 	}
 
+	// Inject HTTP_PROXY for in-container AC client when AC_SERVER_URL points
+	// at a corp UberProxy-fronted host. Without this, `ac` inside the agent
+	// container can't reach the brain (corp DNS isn't resolvable; even when
+	// it is, UberProxy demands SSO via gosso-proxy). Operator runs
+	// gosso-proxy on 127.0.0.1:18181; this helper translates that to a
+	// container-reachable address (host.docker.internal etc.) and sets
+	// NO_PROXY to exempt loopback + hub traffic. Pure env-map mutation;
+	// no-op when AC_SERVER_URL is unset or public.
+	if runtime.EnsureCorpProxyEnv(m.Runtime.Name(), opts.Env) {
+		util.Debugf("Start: injected HTTP_PROXY for corp AC_SERVER_URL=%s -> %s",
+			opts.Env["AC_SERVER_URL"], opts.Env["HTTP_PROXY"])
+	}
+
 	// Persist harness auth override to scion-agent.json so sciontool inside the container sees it.
 	// The actual auth resolution override is applied earlier in the auth gathering block.
 	if opts.HarnessAuth != "" {

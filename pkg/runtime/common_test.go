@@ -1314,3 +1314,172 @@ func TestSharedWorkspace_NoAgentStateInMounts(t *testing.T) {
 		t.Errorf("expected grove %s to be mounted at /workspace, args: %s", groveDir, joined)
 	}
 }
+
+func TestIsCorpHost(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want bool
+	}{
+		{"empty", "", false},
+		{"public github", "https://github.com/foo", false},
+		{"public google", "https://google.com", false},
+		{"public maps", "https://maps.google.com", false},
+		{"corp cloudtop", "http://mjk-agent-server.c.googlers.com:8787", true},
+		{"corp googleplex", "https://memegen.googleplex.com/path", true},
+		{"corp intranet", "https://moma.corp.google.com", true},
+		{"corp sandbox", "https://test.sandbox.google.com", true},
+		{"localhost", "http://localhost:8080", false},
+		{"loopback", "http://127.0.0.1:8787", false},
+		{"malformed", "://broken", false},
+		{"no scheme corp-ish", "mjk-agent-server.c.googlers.com:8787", false}, // url.Parse interprets as scheme:opaque
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isCorpHost(tt.url); got != tt.want {
+				t.Errorf("isCorpHost(%q) = %v, want %v", tt.url, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTranslateProxyForContainer(t *testing.T) {
+	tests := []struct {
+		name        string
+		runtimeName string
+		proxyURL    string
+		want        string
+	}{
+		{"docker loopback", "docker", "http://127.0.0.1:18181", "http://host.docker.internal:18181"},
+		{"docker localhost", "docker", "http://localhost:18181", "http://host.docker.internal:18181"},
+		{"docker ipv6 loopback", "docker", "http://[::1]:18181", "http://host.docker.internal:18181"},
+		{"podman loopback", "podman", "http://127.0.0.1:18181", "http://host.containers.internal:18181"},
+		{"docker external", "docker", "http://corp-proxy.example.com:8080", "http://corp-proxy.example.com:8080"},
+		{"docker invalid url", "docker", "::not a url", "::not a url"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := translateProxyForContainer(tt.runtimeName, tt.proxyURL)
+			if got != tt.want {
+				t.Errorf("translateProxyForContainer(%q, %q) = %q, want %q",
+					tt.runtimeName, tt.proxyURL, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestEnsureCorpProxyEnv exercises the gating logic + the actual injection
+// shape. We unset HTTP_PROXY/HTTPS_PROXY on the test process so each subtest
+// has a clean baseline; subtests that want to assert "use host env" set
+// them via t.Setenv (auto-restored).
+func TestEnsureCorpProxyEnv(t *testing.T) {
+	// Baseline: no host proxy unless a subtest sets one.
+	t.Setenv("HTTP_PROXY", "")
+	t.Setenv("HTTPS_PROXY", "")
+
+	t.Run("no AC_SERVER_URL is a no-op", func(t *testing.T) {
+		env := map[string]string{}
+		if EnsureCorpProxyEnv("docker", env) {
+			t.Errorf("expected no-op, got mutation: %v", env)
+		}
+	})
+
+	t.Run("public AC URL is a no-op", func(t *testing.T) {
+		env := map[string]string{"AC_SERVER_URL": "https://github.com/foo"}
+		if EnsureCorpProxyEnv("docker", env) {
+			t.Errorf("expected no-op for public URL, got mutation: %v", env)
+		}
+	})
+
+	t.Run("pre-existing HTTP_PROXY is preserved", func(t *testing.T) {
+		env := map[string]string{
+			"AC_SERVER_URL": "http://mjk-agent-server.c.googlers.com:8787",
+			"HTTP_PROXY":    "http://operator-set:1234",
+		}
+		if EnsureCorpProxyEnv("docker", env) {
+			t.Errorf("expected no clobber of operator-set HTTP_PROXY, got mutation")
+		}
+		if env["HTTP_PROXY"] != "http://operator-set:1234" {
+			t.Errorf("HTTP_PROXY changed: %q", env["HTTP_PROXY"])
+		}
+	})
+
+	t.Run("corp AC URL with no host proxy uses gosso-proxy default", func(t *testing.T) {
+		env := map[string]string{
+			"AC_SERVER_URL": "http://mjk-agent-server.c.googlers.com:8787",
+		}
+		if !EnsureCorpProxyEnv("docker", env) {
+			t.Fatalf("expected injection, got none")
+		}
+		want := "http://host.docker.internal:18181"
+		if env["HTTP_PROXY"] != want {
+			t.Errorf("HTTP_PROXY = %q, want %q", env["HTTP_PROXY"], want)
+		}
+		if env["HTTPS_PROXY"] != want {
+			t.Errorf("HTTPS_PROXY = %q, want %q", env["HTTPS_PROXY"], want)
+		}
+		// Lowercase variants for legacy tools.
+		if env["http_proxy"] != want {
+			t.Errorf("http_proxy = %q, want %q", env["http_proxy"], want)
+		}
+		// NO_PROXY must exempt loopback + bridge hostnames.
+		noProxy := env["NO_PROXY"]
+		for _, must := range []string{"localhost", "127.0.0.1", "host.docker.internal"} {
+			if !strings.Contains(noProxy, must) {
+				t.Errorf("NO_PROXY missing %q: %q", must, noProxy)
+			}
+		}
+	})
+
+	t.Run("corp AC URL uses host HTTP_PROXY when set", func(t *testing.T) {
+		t.Setenv("HTTP_PROXY", "http://127.0.0.1:9999")
+		env := map[string]string{
+			"AC_SERVER_URL": "https://memegen.googleplex.com/",
+		}
+		if !EnsureCorpProxyEnv("docker", env) {
+			t.Fatalf("expected injection")
+		}
+		want := "http://host.docker.internal:9999"
+		if env["HTTP_PROXY"] != want {
+			t.Errorf("HTTP_PROXY = %q, want %q (host port should be carried over)", env["HTTP_PROXY"], want)
+		}
+	})
+
+	t.Run("podman uses host.containers.internal", func(t *testing.T) {
+		env := map[string]string{
+			"AC_SERVER_URL": "http://mjk-agent-server.c.googlers.com:8787",
+		}
+		if !EnsureCorpProxyEnv("podman", env) {
+			t.Fatalf("expected injection")
+		}
+		if !strings.Contains(env["HTTP_PROXY"], "host.containers.internal") {
+			t.Errorf("podman HTTP_PROXY should reference host.containers.internal: %q", env["HTTP_PROXY"])
+		}
+	})
+
+	t.Run("existing NO_PROXY is preserved as a suffix", func(t *testing.T) {
+		env := map[string]string{
+			"AC_SERVER_URL": "http://mjk-agent-server.c.googlers.com:8787",
+			"NO_PROXY":      "preexisting.example.com",
+		}
+		if !EnsureCorpProxyEnv("docker", env) {
+			t.Fatalf("expected injection")
+		}
+		if !strings.Contains(env["NO_PROXY"], "preexisting.example.com") {
+			t.Errorf("NO_PROXY dropped operator-set entry: %q", env["NO_PROXY"])
+		}
+	})
+
+	t.Run("non-loopback HTTP_PROXY is not rewritten", func(t *testing.T) {
+		t.Setenv("HTTP_PROXY", "http://corp-egress.example.com:3128")
+		env := map[string]string{
+			"AC_SERVER_URL": "http://mjk-agent-server.c.googlers.com:8787",
+		}
+		if !EnsureCorpProxyEnv("docker", env) {
+			t.Fatalf("expected injection")
+		}
+		if env["HTTP_PROXY"] != "http://corp-egress.example.com:3128" {
+			t.Errorf("non-loopback proxy got rewritten: %q", env["HTTP_PROXY"])
+		}
+	})
+}
