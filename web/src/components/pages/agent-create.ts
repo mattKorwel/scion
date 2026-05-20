@@ -42,6 +42,8 @@ interface HarnessConfigEntry {
 import { isSharedWorkspace } from '../../shared/types.js';
 import { apiFetch, parseApiError } from '../../client/api.js';
 import '../shared/status-badge.js';
+import '../shared/ac-scope-picker.js';
+import { pushRecentScope } from '../shared/ac-scope-picker.js';
 
 @customElement('scion-page-agent-create')
 export class ScionPageAgentCreate extends LitElement {
@@ -119,6 +121,16 @@ export class ScionPageAgentCreate extends LitElement {
    */
   @state()
   private acScope = '';
+
+  /**
+   * True when the operator typed an AC scope that doesn't currently
+   * exist in AC. Set by the scope-picker's ac-scope-change event.
+   * On submit, we POST to /api/v1/ac/scopes to create it before
+   * dispatching the agent. False (default) means the scope already
+   * exists or is empty — no create call needed.
+   */
+  @state()
+  private acScopeIsNew = false;
 
   @state()
   private notify = true;
@@ -570,6 +582,16 @@ export class ScionPageAgentCreate extends LitElement {
         return;
       }
 
+      // Create the AC scope in the brain if it doesn't exist yet.
+      // Must happen BEFORE agent dispatch so the broker stamps a
+      // valid scope label on the container; auto-vivification on
+      // first heartbeat works but leaves metadata-less scopes
+      // littering the tree.
+      if (!(await this.ensureACScopeExists())) {
+        this.submitting = false;
+        return;
+      }
+
       const response = await fetch('/api/v1/agents', {
         method: 'POST',
         credentials: 'include',
@@ -597,6 +619,13 @@ export class ScionPageAgentCreate extends LitElement {
 
       if (!agentId) {
         throw new Error('No agent ID in response');
+      }
+
+      // Record the scope in the recents ledger so it bubbles to the
+      // top of the picker on the next agent-create. Best-effort;
+      // localStorage failures (private mode) are swallowed.
+      if (this.acScope.trim()) {
+        pushRecentScope(this.acScope.trim());
       }
 
       // If the backend didn't already start the agent, explicitly start it.
@@ -703,6 +732,13 @@ export class ScionPageAgentCreate extends LitElement {
         return;
       }
 
+      // Mirror the create-and-start path: ensure the AC scope exists
+      // before we POST the agent so the broker stamps a valid label.
+      if (!(await this.ensureACScopeExists())) {
+        this.submittingEdit = false;
+        return;
+      }
+
       const response = await fetch('/api/v1/agents', {
         method: 'POST',
         credentials: 'include',
@@ -729,6 +765,11 @@ export class ScionPageAgentCreate extends LitElement {
 
       if (!agentId) {
         throw new Error('No agent ID in response');
+      }
+
+      // Record scope in recents (same as create-and-start path).
+      if (this.acScope.trim()) {
+        pushRecentScope(this.acScope.trim());
       }
 
       // Navigate to the advanced configure page
@@ -871,6 +912,60 @@ export class ScionPageAgentCreate extends LitElement {
     } catch {
       // If fetch fails, clear editing state
       this.editingAgentId = null;
+    }
+  }
+
+  /**
+   * If the operator picked an AC scope that doesn't exist yet (the
+   * picker emitted ac-scope-change with isNew=true), POST to
+   * /api/v1/ac/scopes to create it before the agent dispatch. This
+   * keeps the brain in sync so the in-container `ac` CLI doesn't
+   * write to a forward-referenced scope on first heartbeat (which
+   * works because AC auto-vivifies, but leaves a metadata-less scope
+   * in the tree — `kind=""`, `title=""` — that operators have to
+   * clean up later).
+   *
+   * Idempotent on the server side: hitting POST against an existing
+   * scope is a no-op merge.
+   *
+   * Errors here are surfaced to the operator and BLOCK agent
+   * creation. Rationale: if AC is unreachable, the operator's
+   * intent (bind agent to scope X) can't be honored. Failing loud
+   * is better than silently creating a scope-less agent that has
+   * the env var set to a string AC doesn't know about.
+   *
+   * Returns true on success or no-op (scope wasn't new). Returns
+   * false on failure with this.error already set.
+   */
+  private async ensureACScopeExists(): Promise<boolean> {
+    if (!this.acScope.trim() || !this.acScopeIsNew) {
+      return true;
+    }
+    try {
+      const res = await apiFetch('/api/v1/ac/scopes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          scope: this.acScope.trim(),
+          // Default kind for UI-created scopes. Operators can edit
+          // metadata later via `ori scope set` or (eventually) a
+          // dedicated UI surface.
+          kind: 'work-item',
+        }),
+      });
+      if (!res.ok) {
+        const err = await parseApiError(res, `HTTP ${res.status}`);
+        this.error = `Failed to create AC scope "${this.acScope}": ${err.message}`;
+        return false;
+      }
+      // Scope now exists in AC. Update local flag so a subsequent
+      // submit (after fixing an unrelated form error) doesn't try
+      // to create it again.
+      this.acScopeIsNew = false;
+      return true;
+    } catch (err) {
+      this.error = `Failed to reach AC scope proxy: ${(err as Error).message || err}`;
+      return false;
     }
   }
 
@@ -1102,19 +1197,21 @@ export class ScionPageAgentCreate extends LitElement {
 
           <div class="form-field">
             <label for="ac-scope">AC Scope</label>
-            <sl-input
+            <scion-ac-scope-picker
               id="ac-scope"
-              placeholder="amplify/my-project"
               .value=${this.acScope}
-              @sl-input=${(e: Event) => {
-                this.acScope = (e.target as HTMLElement & { value: string }).value;
+              @ac-scope-change=${(e: CustomEvent<{ value: string; isNew: boolean }>) => {
+                this.acScope = e.detail.value;
+                this.acScopeIsNew = e.detail.isNew;
               }}
-            ></sl-input>
+            ></scion-ac-scope-picker>
             <div class="hint">
               alteredCarbon brain scope this agent is bound to. Sets
               <code>AC_DEFAULT_SCOPE</code> so the in-container
               <code>ac</code> CLI/MCP server resolves plan + learnings
-              automatically. Leave empty to skip AC binding.
+              automatically. Type to filter existing scopes or enter a
+              new path to create it on submit. Leave empty to skip AC
+              binding.
             </div>
           </div>
 
