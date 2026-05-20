@@ -100,6 +100,26 @@ export class ScionPageAgentCreate extends LitElement {
   @state()
   private task = '';
 
+  /**
+   * AC (alteredCarbon) scope this agent will be bound to. Optional; when
+   * set, surfaces as:
+   *   - container env: AC_DEFAULT_SCOPE=<value>
+   *   - container label: scion.ac_scope=<value>
+   *
+   * The in-container `ac` CLI and MCP server read AC_DEFAULT_SCOPE to
+   * resolve `ac plan read` / `ac learning append` etc. without per-call
+   * --scope. The broker's heartbeat loop walks `scion.ac_scope`-labeled
+   * agents and pings AC for liveness.
+   *
+   * Free-text in v1; future revisions may autocomplete from
+   * /api/v1/ac/scope_list once a hub proxy exists. Operator types the
+   * scope path (e.g. "amplify/managed-claw/hosted-service"). Empty
+   * preserves the existing scope-less behavior — agent gets no AC
+   * binding and the broker-side AC heartbeat is a no-op for this agent.
+   */
+  @state()
+  private acScope = '';
+
   @state()
   private notify = true;
 
@@ -517,13 +537,31 @@ export class ScionPageAgentCreate extends LitElement {
         };
       }
 
-      // Pass config options
-      const config: Record<string, unknown> = {
-        env: {
-          SCION_TELEMETRY_ENABLED: this.telemetryEnabled ? 'true' : 'false',
-        },
+      // Pass config options. The env map here ends up as the agent's
+      // container env (via the broker dispatch path). AC scope, when set,
+      // becomes AC_DEFAULT_SCOPE so the in-container `ac` CLI/MCP server
+      // pick it up automatically — same shape as the CLI's
+      // `scion start --scope` flag (cmd/common.go:485).
+      const env: Record<string, string> = {
+        SCION_TELEMETRY_ENABLED: this.telemetryEnabled ? 'true' : 'false',
       };
+      if (this.acScope.trim()) {
+        env.AC_DEFAULT_SCOPE = this.acScope.trim();
+      }
+      const config: Record<string, unknown> = { env };
       body.config = config;
+
+      // Also stamp the AC scope as a top-level container label. The broker
+      // already infers `scion.ac_scope` from AC_DEFAULT_SCOPE env at spawn
+      // time (pkg/agent/run.go:898 via resolveBrainScopeFromOpts), so this
+      // is belt-and-suspenders rather than load-bearing. Explicit-labels
+      // beats implicit inference: a future refactor that drops the env→
+      // label inference won't break the UI-created agents' scope binding,
+      // and the label-driven AC heartbeat loop in
+      // pkg/runtimebroker/heartbeat.go keeps working.
+      if (this.acScope.trim()) {
+        body.labels = { 'scion.ac_scope': this.acScope.trim() };
+      }
 
       // Validate GCP assign mode
       if (this.gcpMetadataMode === 'assign' && !this.gcpServiceAccountId) {
@@ -631,6 +669,15 @@ export class ScionPageAgentCreate extends LitElement {
       }
       if (this.task.trim()) {
         body.task = this.task.trim();
+      }
+
+      // AC scope plumbing: identical to the create-and-start path. The
+      // provision-only flow still needs env + label so a later `scion
+      // start <agent>` (via UI or CLI) picks up the AC binding from the
+      // already-provisioned agent record.
+      if (this.acScope.trim()) {
+        body.config = { env: { AC_DEFAULT_SCOPE: this.acScope.trim() } };
+        body.labels = { 'scion.ac_scope': this.acScope.trim() };
       }
 
       // GCP identity assignment
@@ -815,6 +862,12 @@ export class ScionPageAgentCreate extends LitElement {
       if (agent.template) this.templateId = agent.template;
       if (agent.runtimeBrokerId) this.brokerId = agent.runtimeBrokerId;
       if (agent.appliedConfig?.profile) this.profile = agent.appliedConfig.profile;
+      // Pre-fill AC scope from the container label so re-configuring
+      // doesn't strip the scope binding. The broker stamps this label at
+      // spawn time from AC_DEFAULT_SCOPE in env; we read it back here.
+      if (agent.labels?.['scion.ac_scope']) {
+        this.acScope = agent.labels['scion.ac_scope'];
+      }
     } catch {
       // If fetch fails, clear editing state
       this.editingAgentId = null;
@@ -1045,6 +1098,24 @@ export class ScionPageAgentCreate extends LitElement {
               }}
               required
             ></sl-input>
+          </div>
+
+          <div class="form-field">
+            <label for="ac-scope">AC Scope</label>
+            <sl-input
+              id="ac-scope"
+              placeholder="amplify/my-project"
+              .value=${this.acScope}
+              @sl-input=${(e: Event) => {
+                this.acScope = (e.target as HTMLElement & { value: string }).value;
+              }}
+            ></sl-input>
+            <div class="hint">
+              alteredCarbon brain scope this agent is bound to. Sets
+              <code>AC_DEFAULT_SCOPE</code> so the in-container
+              <code>ac</code> CLI/MCP server resolves plan + learnings
+              automatically. Leave empty to skip AC binding.
+            </div>
           </div>
 
           ${this.selectedGrove?.gitRemote && !isSharedWorkspace(this.selectedGrove)

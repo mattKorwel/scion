@@ -89,6 +89,23 @@ export class ScionPageAgents extends LitElement {
   @state()
   private agentScope: 'all' | 'mine' | 'shared' = 'all';
 
+  /**
+   * AC (alteredCarbon) scope filter. Free-text substring match against
+   * each agent's `scion.ac_scope` label. Empty = no filter (all agents).
+   *
+   * Client-side only — the hub doesn't (yet) support a server-side
+   * label filter for the agents list, and pulling 20-50 agents and
+   * filtering in the browser is cheap. If this becomes the daily-driver
+   * surface for fan-out (per the migration plan in amplify/ori plan),
+   * push a server-side filter as a follow-up.
+   *
+   * Substring match (not exact) so the operator can type a project
+   * prefix like "amplify/managed-claw" to see all managed-claw sub-
+   * scope agents without per-leaf typing.
+   */
+  @state()
+  private acScopeFilter = '';
+
   static override styles = [
     listPageStyles,
     css`
@@ -429,6 +446,32 @@ export class ScionPageAgents extends LitElement {
     return this.agents.some((a) => isAgentRunning(a));
   }
 
+  /**
+   * Agents after the operator-driven AC scope filter is applied. Pure
+   * substring match against `scion.ac_scope` label. Case-insensitive so
+   * the filter matches both "amplify/X" and "Amplify/x".
+   *
+   * When the filter is empty, returns the underlying agents array
+   * unchanged (no copy). Render paths read this getter instead of
+   * this.agents directly.
+   */
+  private get filteredAgents(): Agent[] {
+    const q = this.acScopeFilter.trim().toLowerCase();
+    if (!q) return this.agents;
+    return this.agents.filter((a) => {
+      const s = a.labels?.['scion.ac_scope'];
+      return s && s.toLowerCase().includes(q);
+    });
+  }
+
+  /**
+   * Convenience for the inline meta in cards/rows. Returns the agent's
+   * scion.ac_scope label or empty string.
+   */
+  private static acScopeOf(agent: Agent): string {
+    return agent.labels?.['scion.ac_scope'] ?? '';
+  }
+
   private async handleStopAll(): Promise<void> {
     if (!confirm('Are you sure you want to stop all running agents?')) {
       return;
@@ -538,6 +581,20 @@ export class ScionPageAgents extends LitElement {
         </div>
       </div>
 
+      <div class="filter-bar" style="margin-bottom: 0.75rem; max-width: 24rem;">
+        <sl-input
+          size="small"
+          placeholder="Filter by AC scope (e.g. amplify/managed-claw)"
+          clearable
+          .value=${this.acScopeFilter}
+          @sl-input=${(e: Event) => {
+            this.acScopeFilter = (e.target as HTMLElement & { value: string }).value;
+          }}
+        >
+          <sl-icon slot="prefix" name="funnel"></sl-icon>
+        </sl-input>
+      </div>
+
       ${this.loading ? this.renderLoading() : this.error ? this.renderError() : this.renderAgents()}
     `;
   }
@@ -589,6 +646,27 @@ export class ScionPageAgents extends LitElement {
       return this.renderEmptyState();
     }
 
+    // Honor the AC scope filter. When the filter narrows everything to
+    // zero, show a dedicated empty state explaining what's happening
+    // — otherwise the operator might think their agents disappeared.
+    if (this.filteredAgents.length === 0 && this.acScopeFilter.trim()) {
+      return html`
+        <div class="empty-state">
+          <sl-icon name="funnel"></sl-icon>
+          <h2>No agents match filter</h2>
+          <p>
+            No agents have an <code>scion.ac_scope</code> label matching
+            <code>${this.acScopeFilter}</code>. Clear the filter to see all
+            ${this.agents.length} agent${this.agents.length === 1 ? '' : 's'}.
+          </p>
+          <sl-button size="small" @click=${() => { this.acScopeFilter = ''; }}>
+            <sl-icon slot="prefix" name="x-circle"></sl-icon>
+            Clear filter
+          </sl-button>
+        </div>
+      `;
+    }
+
     return this.viewMode === 'grid' ? this.renderGrid() : this.renderTable();
   }
 
@@ -614,7 +692,7 @@ export class ScionPageAgents extends LitElement {
 
   private renderGrid() {
     return html`
-      <div class="resource-grid">${this.agents.map((agent) => this.renderAgentCard(agent))}</div>
+      <div class="resource-grid">${this.filteredAgents.map((agent) => this.renderAgentCard(agent))}</div>
     `;
   }
 
@@ -632,6 +710,12 @@ export class ScionPageAgents extends LitElement {
               </a>
             </h3>
             <div class="agent-meta">
+              ${ScionPageAgents.acScopeOf(agent)
+                ? html`<div title="alteredCarbon brain scope">
+                    <sl-icon name="bullseye"></sl-icon>
+                    <code style="font-size: 0.8125rem;">${ScionPageAgents.acScopeOf(agent)}</code>
+                  </div>`
+                : ''}
               ${agent.grove ? html`<div><sl-icon name="folder"></sl-icon> <a href="/groves/${agent.groveId}" @click=${(e: MouseEvent) => e.stopPropagation()}>${agent.grove}</a></div>` : ''}
               <div><sl-icon name="code-square"></sl-icon> ${agent.template}</div>
               ${agent.runtimeBrokerId
@@ -742,6 +826,7 @@ export class ScionPageAgents extends LitElement {
           <thead>
             <tr>
               <th>Name</th>
+              <th class="hide-mobile">AC Scope</th>
               <th>Grove</th>
               <th class="hide-mobile">Template</th>
               <th class="status-col">Status</th>
@@ -750,7 +835,7 @@ export class ScionPageAgents extends LitElement {
             </tr>
           </thead>
           <tbody>
-            ${this.agents.map((agent) => this.renderAgentRow(agent))}
+            ${this.filteredAgents.map((agent) => this.renderAgentRow(agent))}
           </tbody>
         </table>
       </div>
@@ -760,6 +845,7 @@ export class ScionPageAgents extends LitElement {
   private renderAgentRow(agent: Agent) {
     const isLoading = this.actionLoading[agent.id] || false;
 
+    const acScope = ScionPageAgents.acScopeOf(agent);
     return html`
       <tr>
         <td>
@@ -767,6 +853,11 @@ export class ScionPageAgents extends LitElement {
             <sl-icon name="cpu"></sl-icon>
             <a href="/agents/${agent.id}">${agent.name}</a>
           </span>
+        </td>
+        <td class="hide-mobile">
+          ${acScope
+            ? html`<code style="font-size: 0.8125rem;">${acScope}</code>`
+            : html`<span style="color: var(--scion-text-muted, #94a3b8);">\u2014</span>`}
         </td>
         <td>${agent.grove ? html`<a href="/groves/${agent.groveId}" class="grove-link">${agent.grove}</a>` : '\u2014'}</td>
         <td class="hide-mobile">${agent.template}</td>

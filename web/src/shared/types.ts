@@ -423,6 +423,19 @@ export interface Agent {
 
   // Cloud Logging capability (from hub)
   cloudLogging?: boolean;
+
+  // Container metadata passthrough from runtime. The hub forwards these
+  // verbatim from AgentInfo.Labels in pkg/api/types.go. Notable keys:
+  //   scion.ac_scope:       alteredCarbon brain scope this agent is bound
+  //                         to (set when the operator passes --scope on
+  //                         the CLI or fills the AC Scope field in the UI)
+  //   scion.grove_id:       grove UUID (for hub-mode agents)
+  //   scion.harness_config: resolved harness config name
+  //   scion.template:       resolved template slug
+  // The UI reads scion.ac_scope to group/filter agents by their AC scope
+  // (see pages/agents.ts) and to display it on agent-detail.
+  labels?: Record<string, string>;
+  annotations?: Record<string, string>;
 }
 
 /**

@@ -975,6 +975,14 @@ export class ScionPageAgentDetail extends LitElement {
               <sl-icon name="code-square"></sl-icon>
               ${agent.template}
             </span>
+            ${agent.labels?.['scion.ac_scope']
+              ? html`
+                  <span class="template-badge" title="alteredCarbon brain scope">
+                    <sl-icon name="bullseye"></sl-icon>
+                    ${agent.labels['scion.ac_scope']}
+                  </span>
+                `
+              : ''}
             ${this.grove
               ? html`
                   <a href="/groves/${this.grove.id}" class="grove-link">
@@ -1397,6 +1405,16 @@ export class ScionPageAgentDetail extends LitElement {
             <span class="info-label">Template</span>
             <span class="info-value">${agent.template}</span>
           </div>
+          ${agent.labels?.['scion.ac_scope']
+            ? html`
+                <div class="info-item">
+                  <span class="info-label" title="alteredCarbon brain scope">
+                    AC Scope
+                  </span>
+                  <span class="info-value mono">${agent.labels['scion.ac_scope']}</span>
+                </div>
+              `
+            : ''}
           ${cfg?.templateId
             ? html`
                 <div class="info-item">
