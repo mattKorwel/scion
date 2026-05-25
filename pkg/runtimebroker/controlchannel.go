@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -262,6 +263,13 @@ func (c *ControlChannelClient) doConnect() error {
 }
 
 // buildWebSocketURL constructs the WebSocket URL from the Hub endpoint.
+//
+// The endpoint may include a path component (e.g. when the broker reaches
+// the hub through a reverse-proxy mount at a non-root URL like
+// http://localhost:18181/scion-hub). The path component is treated as a
+// mount prefix and preserved; the broker's well-known WS path is appended.
+// HubEndpoint without a path (the common case) yields exactly the
+// well-known path, unchanged.
 func (c *ControlChannelClient) buildWebSocketURL() (string, error) {
 	u, err := url.Parse(c.config.HubEndpoint)
 	if err != nil {
@@ -280,8 +288,29 @@ func (c *ControlChannelClient) buildWebSocketURL() (string, error) {
 		u.Scheme = "ws"
 	}
 
-	u.Path = "/api/v1/runtime-brokers/connect"
+	u.Path = joinHubPath(u.Path, brokerControlChannelPath)
 	return u.String(), nil
+}
+
+// brokerControlChannelPath is the well-known path the hub serves the
+// broker control-channel WebSocket on. Append to HubEndpoint.Path when
+// constructing the dial URL so reverse-proxy mounts (e.g. gosso-proxy's
+// --mount=/scion-hub=http://hub:8788) are honored.
+const brokerControlChannelPath = "/api/v1/runtime-brokers/connect"
+
+// joinHubPath concatenates a hub endpoint's mount-prefix path with the
+// broker's well-known path, normalizing slashes so the result has
+// exactly one "/" between segments. An empty or "/" prefix returns just
+// the well-known path.
+func joinHubPath(prefix, wellKnown string) string {
+	prefix = strings.TrimSuffix(prefix, "/")
+	if prefix == "" {
+		return wellKnown
+	}
+	if !strings.HasPrefix(wellKnown, "/") {
+		wellKnown = "/" + wellKnown
+	}
+	return prefix + wellKnown
 }
 
 // buildAuthHeaders creates the HMAC-signed headers for authentication.
@@ -294,12 +323,17 @@ func (c *ControlChannelClient) buildAuthHeaders() (http.Header, error) {
 		return headers, nil
 	}
 
-	// Build a dummy request for signing
+	// Build a dummy request for signing. The hub validates the signature
+	// against the well-known PATH only (without any reverse-proxy mount
+	// prefix), so we sign just brokerControlChannelPath here regardless
+	// of any prefix in HubEndpoint. The dial URL (built in
+	// buildWebSocketURL) preserves the prefix so the mount routes; the
+	// hub strips it before signature validation.
 	u, err := url.Parse(c.config.HubEndpoint)
 	if err != nil {
 		return nil, fmt.Errorf("invalid hub endpoint: %w", err)
 	}
-	u.Path = "/api/v1/runtime-brokers/connect"
+	u.Path = brokerControlChannelPath
 
 	req, err := http.NewRequest("GET", u.String(), nil)
 	if err != nil {

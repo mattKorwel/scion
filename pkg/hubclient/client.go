@@ -19,6 +19,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -341,11 +343,35 @@ func WithAgentToken(token string) Option {
 // WithHMACAuth sets HMAC-based broker authentication.
 // This is used by Runtime Brokers to authenticate with the Hub using
 // the shared secret established during the join process.
+//
+// When the hub endpoint includes a path component (e.g. when the broker
+// reaches the hub through a reverse-proxy mount at
+// http://localhost:18181/scion-hub), that prefix is stripped from
+// signed paths so the HMAC matches what the hub sees after the proxy
+// strips the mount prefix.
 func WithHMACAuth(brokerID string, secretKey []byte) Option {
 	return func(c *client) {
 		c.transport.Auth = &apiclient.HMACAuth{
-			BrokerID:  brokerID,
-			SecretKey: secretKey,
+			BrokerID:   brokerID,
+			SecretKey:  secretKey,
+			PathPrefix: hubMountPrefix(c.transport.BaseURL),
 		}
 	}
+}
+
+// hubMountPrefix extracts the URL path component (without trailing
+// slash) from a hub endpoint base URL. Returns "" if there is no path
+// or only "/". Used to strip the reverse-proxy mount prefix from
+// HMAC-signed request paths so the broker's signature matches what the
+// hub sees post-strip.
+func hubMountPrefix(baseURL string) string {
+	if baseURL == "" {
+		return ""
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return ""
+	}
+	p := strings.TrimSuffix(u.Path, "/")
+	return p
 }

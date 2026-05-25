@@ -43,6 +43,15 @@ const (
 type HMACAuth struct {
 	BrokerID  string
 	SecretKey []byte
+	// PathPrefix is stripped from the request URL path before HMAC
+	// signing. Set this when the broker reaches the hub through a
+	// reverse-proxy mount at a non-root URL (e.g.
+	// SCION_HUB_ENDPOINT=http://localhost:18181/scion-hub): the request
+	// URL carries "/scion-hub/api/v1/..." but the hub's signature
+	// verification sees "/api/v1/..." after the mount-proxy strips the
+	// prefix. Leave empty for the common case (broker speaks directly
+	// to the hub).
+	PathPrefix string
 }
 
 // ApplyAuth adds HMAC authentication headers to the request.
@@ -66,8 +75,10 @@ func (a *HMACAuth) ApplyAuth(req *http.Request) error {
 	req.Header.Set(HeaderTimestamp, timestamp)
 	req.Header.Set(HeaderNonce, nonce)
 
-	// 4. Build canonical string (must match hub/hostauth.go exactly)
-	canonical := BuildCanonicalString(req, timestamp, nonce)
+	// 4. Build canonical string (must match hub/hostauth.go exactly).
+	// Sign the request as the hub will see it: with the reverse-proxy
+	// mount prefix stripped (if any).
+	canonical := BuildCanonicalStringWithPrefix(req, timestamp, nonce, a.PathPrefix)
 
 	// 5. Compute HMAC-SHA256
 	sig := ComputeHMAC(a.SecretKey, canonical)
@@ -83,14 +94,30 @@ func (a *HMACAuth) Refresh() (bool, error) { return false, nil }
 // Format: METHOD\nPATH\nQUERY\nTIMESTAMP\nNONCE\nSIGNED_HEADERS\nBODY_HASH
 // This function must produce identical output to hub/hostauth.go:buildCanonicalString.
 func BuildCanonicalString(r *http.Request, timestamp, nonce string) []byte {
+	return BuildCanonicalStringWithPrefix(r, timestamp, nonce, "")
+}
+
+// BuildCanonicalStringWithPrefix is like BuildCanonicalString but strips
+// pathPrefix from r.URL.Path before including it in the canonical
+// string. Used when the broker reaches the hub through a reverse-proxy
+// mount so the signed path matches what the hub sees after the proxy
+// strips the mount prefix.
+func BuildCanonicalStringWithPrefix(r *http.Request, timestamp, nonce, pathPrefix string) []byte {
 	var buf bytes.Buffer
 
 	// HTTP method
 	buf.WriteString(r.Method)
 	buf.WriteByte('\n')
 
-	// Request path
-	buf.WriteString(r.URL.Path)
+	// Request path (with optional mount prefix stripped)
+	path := r.URL.Path
+	if pathPrefix != "" && strings.HasPrefix(path, pathPrefix) {
+		path = strings.TrimPrefix(path, pathPrefix)
+		if path == "" {
+			path = "/"
+		}
+	}
+	buf.WriteString(path)
 	buf.WriteByte('\n')
 
 	// Query string (raw, unsorted - matches hub behavior)
