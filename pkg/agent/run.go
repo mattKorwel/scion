@@ -193,6 +193,11 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// Default values
 	resolvedImage := ""
 	unixUsername := "root"
+	// wrapInTmux tracks the harness-config's wrap_in_tmux setting. nil
+	// means "use runtime default" (which is true). On-disk harness-config
+	// wins over settings, matching the precedence of image / user
+	// resolution below.
+	var wrapInTmux *bool
 	profileName := opts.Profile
 
 	util.Debugf("image resolution: starting, harnessConfigName=%s", harnessConfigName)
@@ -236,6 +241,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			if hcDir.Config.User != "" {
 				unixUsername = hcDir.Config.User
 			}
+			if hcDir.Config.WrapInTmux != nil {
+				wrapInTmux = hcDir.Config.WrapInTmux
+			}
 		} else {
 			util.Debugf("image resolution: on-disk harness-config %q not found: %v", harnessConfigName, err)
 		}
@@ -250,6 +258,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			}
 			if hConfig.User != "" {
 				unixUsername = hConfig.User
+			}
+			if hConfig.WrapInTmux != nil {
+				wrapInTmux = hConfig.WrapInTmux
 			}
 		} else {
 			util.Debugf("image resolution: settings harness-config %q not found", harnessConfigName)
@@ -889,6 +900,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		MetadataInterception: hasMetadataInterception(agentEnv),
 		ExtraHosts:           mergeExtraHosts(opts.ExtraHosts, runtime.BridgeExtraHosts(m.Runtime.Name(), agentEnv)),
 		NetworkMode:          dockerNetworkMode,
+		WrapInTmux:           wrapInTmux,
 		Labels: func() map[string]string {
 			l := map[string]string{
 				"scion.agent":          "true",

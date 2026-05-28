@@ -531,6 +531,43 @@ func TestBuildCommonRunArgs(t *testing.T) {
 				":/workspace:",
 			},
 		},
+		{
+			// WrapInTmux=false skips the "tmux new-session ..." wrapper
+			// and runs the harness command via "exec <cmd>" so stdout
+			// and exit status flow straight to the container's log.
+			name: "wrap_in_tmux false bypasses tmux",
+			config: RunConfig{
+				Harness:      &harness.GeminiCLI{},
+				Name:         "test-agent",
+				UnixUsername: "scion",
+				Image:        "scion-agent:latest",
+				Task:         "hello",
+				WrapInTmux:   func() *bool { b := false; return &b }(),
+			},
+			wantIn: []string{
+				"sh", "-c",
+				"exec gemini",
+			},
+			wantOut: []string{
+				"tmux new-session",
+			},
+		},
+		{
+			// WrapInTmux=true (explicit) matches the default tmux-wrapping
+			// shape; covered as a regression guard.
+			name: "wrap_in_tmux true explicit",
+			config: RunConfig{
+				Harness:      &harness.GeminiCLI{},
+				Name:         "test-agent",
+				UnixUsername: "scion",
+				Image:        "scion-agent:latest",
+				Task:         "hello",
+				WrapInTmux:   func() *bool { b := true; return &b }(),
+			},
+			wantIn: []string{
+				"tmux new-session -d -s scion -n agent",
+			},
+		},
 	}
 
 	for _, tt := range tests {

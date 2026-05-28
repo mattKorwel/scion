@@ -544,6 +544,19 @@ type HarnessConfigEntry struct {
 	AuthSelectedType string               `json:"auth_selected_type,omitempty" yaml:"auth_selected_type,omitempty" koanf:"auth_selected_type"`
 	Secrets          []api.RequiredSecret `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
 
+	// WrapInTmux, when set to false, suppresses the default
+	// "tmux new-session ..." wrapping that the runtime applies to the
+	// harness command before passing it to the container. Defaults to
+	// true (nil pointer) for backward compatibility with the existing
+	// LLM harnesses (claude/gemini/codex/opencode), which depend on the
+	// tmux session for attach/sit semantics.
+	//
+	// Set to false for non-interactive / one-shot harnesses (e.g. a
+	// "shell" harness that runs the task as a literal sh -c command and
+	// exits) where tmux just gets in the way and traps stdout inside a
+	// pane that scion logs can't reach.
+	WrapInTmux *bool `json:"wrap_in_tmux,omitempty" yaml:"wrap_in_tmux,omitempty" koanf:"wrap_in_tmux"`
+
 	Provisioner      *HarnessProvisionerConfig        `json:"provisioner,omitempty" yaml:"provisioner,omitempty" koanf:"provisioner"`
 	ConfigDir        string                           `json:"config_dir,omitempty" yaml:"config_dir,omitempty" koanf:"config_dir"`
 	SkillsDir        string                           `json:"skills_dir,omitempty" yaml:"skills_dir,omitempty" koanf:"skills_dir"`

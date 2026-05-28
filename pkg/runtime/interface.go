@@ -49,6 +49,14 @@ type RunConfig struct {
 	MetadataInterception bool     // Add NET_ADMIN cap for iptables-based metadata server interception
 	ExtraHosts           []string // Extra /etc/hosts entries (e.g. "host.docker.internal:host-gateway")
 	NetworkMode          string   // Container network mode (e.g. "host" for --network=host)
+
+	// WrapInTmux controls whether the harness command is wrapped in a
+	// tmux session before being passed to the container's `sh -c`.
+	// Defaults to true when nil (preserves existing LLM-harness
+	// attach/sit semantics). Set to false for non-interactive,
+	// one-shot harnesses where tmux just traps stdout in a pane.
+	// Plumbed from HarnessConfigEntry.WrapInTmux.
+	WrapInTmux *bool
 }
 
 type Runtime interface {

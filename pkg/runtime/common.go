@@ -388,7 +388,11 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		return nil, fmt.Errorf("no harness provided")
 	}
 
-	// Build tmux-wrapped command
+	// Build the command line. For the default (tmux-wrapping) path the
+	// args are shell-quoted and embedded in a `tmux new-session` line.
+	// For the WrapInTmux=false path we still need shell quoting because
+	// we wrap in `sh -c` so that fuse mounts and other prefix commands
+	// can be chained on; the container entrypoint is /bin/sh.
 	var quotedArgs []string
 	for _, a := range harnessArgs {
 		if strings.ContainsAny(a, " \t\n\"'$") {
@@ -399,19 +403,39 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	}
 	cmdLine := strings.Join(quotedArgs, " ")
 
-	// Build tmux command: create session with "agent" window running the harness,
-	// then add a "shell" window and switch back to the agent window.
-	tmuxCmd := fmt.Sprintf(
-		"tmux new-session -d -s scion -n agent %s \\; set-option -g window-size latest \\; new-window -t scion -n shell \\; select-window -t scion:agent \\; attach-session -t scion",
-		cmdLine,
-	)
+	// WrapInTmux defaults to true: every LLM harness today
+	// (claude/gemini/codex/opencode) depends on the tmux session for
+	// attach/sit semantics. Setting WrapInTmux=false in a
+	// harness-config switches to a "run the command and exit" shape
+	// where stdout/stderr flow straight to the container's logs and
+	// `scion logs` can surface them. See HarnessConfigEntry.WrapInTmux.
+	wrapInTmux := true
+	if config.WrapInTmux != nil {
+		wrapInTmux = *config.WrapInTmux
+	}
+
+	var innerCmd string
+	if wrapInTmux {
+		// Build tmux command: create session with "agent" window running
+		// the harness, then add a "shell" window and switch back to the
+		// agent window.
+		innerCmd = fmt.Sprintf(
+			"tmux new-session -d -s scion -n agent %s \\; set-option -g window-size latest \\; new-window -t scion -n shell \\; select-window -t scion:agent \\; attach-session -t scion",
+			cmdLine,
+		)
+	} else {
+		// Run the command directly. `exec` so the container's PID 1 is
+		// the harness command itself; when it exits the container exits,
+		// which is the expected lifecycle for a oneshot harness.
+		innerCmd = fmt.Sprintf("exec %s", cmdLine)
+	}
 
 	if len(fuseMounts) > 0 {
 		mountCmds := strings.Join(fuseMounts, " && ")
-		wrapped := fmt.Sprintf("%s && exec sh -c %q", mountCmds, tmuxCmd)
+		wrapped := fmt.Sprintf("%s && exec sh -c %q", mountCmds, innerCmd)
 		args = append(args, "sh", "-c", wrapped)
 	} else {
-		args = append(args, "sh", "-c", tmuxCmd)
+		args = append(args, "sh", "-c", innerCmd)
 	}
 
 	return args, nil
