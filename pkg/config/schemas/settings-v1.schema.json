@@ -325,6 +325,10 @@
           "type": "object",
           "description": "Optional hook dialect metadata.",
           "additionalProperties": true
+        },
+        "wrap_in_tmux": {
+          "type": "boolean",
+          "description": "When false, the runtime bypasses the default 'tmux new-session ...' wrapper that frames the harness command inside the container. Defaults to true (matching every existing LLM harness). Set to false for one-shot/non-interactive harnesses (e.g. a shell harness that runs the task as a literal sh -c command and exits) so stdout/exit-code flow straight to the container log instead of being trapped in a tmux pane."
         }
       },
       "additionalProperties": false
