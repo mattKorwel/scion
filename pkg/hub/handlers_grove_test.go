@@ -940,6 +940,112 @@ func TestResolveRuntimeBroker_HubNativeGrove_NoLocalPath(t *testing.T) {
 		"LocalPath should NOT be set when auto-linking during agent creation for hub-native grove")
 }
 
+// TestResolveRuntimeBroker_StaleDefaultFallsThrough verifies the
+// "default broker is a hint, not a constraint" behavior. When a
+// grove's stored default broker is offline but a healthy alternative
+// exists, dispatch should auto-select the alternative rather than
+// returning "Default runtime broker is unavailable" and forcing the
+// operator to pass --broker. Repros the issue that bit us tonight
+// when the global grove's recorded default (alpha) went offline.
+func TestResolveRuntimeBroker_StaleDefaultFallsThrough(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Offline broker used as the grove's default.
+	staleDefault := &store.RuntimeBroker{
+		ID:          "broker-stale-default",
+		Slug:        "stale-default",
+		Name:        "Stale Default Broker",
+		Status:      store.BrokerStatusOffline,
+		AutoProvide: true,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, staleDefault))
+
+	// Healthy broker that should auto-take over.
+	healthy := &store.RuntimeBroker{
+		ID:          "broker-healthy-fallback",
+		Slug:        "healthy-fallback",
+		Name:        "Healthy Fallback",
+		Status:      store.BrokerStatusOnline,
+		AutoProvide: true,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, healthy))
+
+	// Grove with stale default + both brokers linked as providers.
+	grove := &store.Grove{
+		ID:                     "grove-stale-default",
+		Slug:                   "stale-default-grove",
+		Name:                   "Stale Default Grove",
+		DefaultRuntimeBrokerID: staleDefault.ID,
+	}
+	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.AddGroveProvider(ctx, &store.GroveProvider{
+		GroveID: grove.ID, BrokerID: staleDefault.ID, BrokerName: staleDefault.Name,
+		Status: store.BrokerStatusOffline, LinkedBy: "test",
+	}))
+	require.NoError(t, s.AddGroveProvider(ctx, &store.GroveProvider{
+		GroveID: grove.ID, BrokerID: healthy.ID, BrokerName: healthy.Name,
+		Status: store.BrokerStatusOnline, LinkedBy: "test",
+	}))
+
+	// Dispatch WITHOUT --broker — should pick the healthy one even
+	// though the stale default is recorded on the grove.
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", map[string]interface{}{
+		"name":    "fallback-target",
+		"groveId": grove.ID,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	var resp CreateAgentResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.NotNil(t, resp.Agent)
+	assert.Equal(t, healthy.ID, resp.Agent.RuntimeBrokerID,
+		"expected dispatch to fall through to healthy broker when stale default is offline")
+}
+
+// TestResolveRuntimeBroker_UnsetDefaultIsLearnedFromSingleProvider
+// verifies the opportunistic default-learning behavior: when a grove
+// has no default and exactly one healthy provider, dispatch picks it
+// AND writes it back as the grove's default so subsequent
+// `scion hub groves` listings show the actual usable broker (not "—")
+// and future dispatches stay deterministic.
+func TestResolveRuntimeBroker_UnsetDefaultIsLearnedFromSingleProvider(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	broker := &store.RuntimeBroker{
+		ID:          "broker-only-one",
+		Slug:        "only-one",
+		Name:        "Only Provider",
+		Status:      store.BrokerStatusOnline,
+		AutoProvide: true,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	grove := &store.Grove{
+		ID:   "grove-no-default",
+		Slug: "no-default",
+		Name: "No Default Grove",
+	}
+	require.NoError(t, s.CreateGrove(ctx, grove))
+	require.NoError(t, s.AddGroveProvider(ctx, &store.GroveProvider{
+		GroveID: grove.ID, BrokerID: broker.ID, BrokerName: broker.Name,
+		Status: store.BrokerStatusOnline, LinkedBy: "test",
+	}))
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", map[string]interface{}{
+		"name":    "learner-target",
+		"groveId": grove.ID,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	// Verify the grove's default was updated to the broker we picked.
+	after, err := s.GetGrove(ctx, grove.ID)
+	require.NoError(t, err)
+	assert.Equal(t, broker.ID, after.DefaultRuntimeBrokerID,
+		"resolveRuntimeBroker should opportunistically learn the default when grove has none")
+}
+
 // TestGroveRegisterPreservesProviderLocalPath verifies that re-registering a
 // grove from a local checkout does not overwrite an existing provider's empty
 // localPath. This prevents a hub-native git grove (where agents clone from a

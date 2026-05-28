@@ -8560,39 +8560,36 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 		return "", store.ErrNotFound
 	}
 
-	// Case 2: Use grove's default runtime broker (must be online and dispatchable)
+	// Case 2: Use grove's default runtime broker if it's online AND
+	// dispatchable. Otherwise fall through to auto-select below — a
+	// stale "default" pointer (e.g. a broker that was healthy when
+	// the grove was first linked but has since gone offline) should
+	// not block dispatch when other healthy brokers can serve the
+	// grove. The default is a HINT, not a constraint.
+	//
+	// History: the previous behavior returned an error here when the
+	// default was offline ("Default runtime broker is unavailable;
+	// specify an alternative"), forcing every `scion start` to pass
+	// `--broker <id>` once any default went sick. Operators who
+	// installed the broker once and never expected to think about it
+	// again had a sharp edge they couldn't see coming. Treat the
+	// default as a preference; fall through when unusable.
 	if grove.DefaultRuntimeBrokerID != "" {
-		// Check if the default broker is still available
 		for _, h := range availableBrokers {
-			if h.ID == grove.DefaultRuntimeBrokerID {
-				if s.canDispatchToBroker(ctx, &h) {
-					return grove.DefaultRuntimeBrokerID, nil
-				}
-				// Default broker exists but user can't dispatch to it — fall through
-				break
+			if h.ID == grove.DefaultRuntimeBrokerID && s.canDispatchToBroker(ctx, &h) {
+				return grove.DefaultRuntimeBrokerID, nil
 			}
 		}
-		// Default broker is not available or not dispatchable
-		if len(availableBrokers) > 0 {
-			NoRuntimeBroker(w, "Default runtime broker is unavailable; specify an alternative", brokerSummaries)
-		} else {
-			NoRuntimeBroker(w, "Default runtime broker is unavailable and no alternatives found", brokerSummaries)
-		}
-		return "", store.ErrNotFound
+		slog.Info("Grove default broker unavailable; falling back to auto-select",
+			"grove_id", grove.ID,
+			"defaultBrokerID", grove.DefaultRuntimeBrokerID,
+			"availableBrokers", len(availableBrokers))
 	}
 
-	// Case 3: No default and no explicit broker - auto-select only when there is
-	// exactly one provider and its broker is online and dispatchable.
-	if len(allProviders) == 1 {
-		broker, brokerErr := s.store.GetRuntimeBroker(ctx, allProviders[0].BrokerID)
-		if brokerErr == nil && broker.Status == store.BrokerStatusOnline && s.canDispatchToBroker(ctx, broker) {
-			return allProviders[0].BrokerID, nil
-		}
-		NoRuntimeBroker(w, "No runtime brokers available for this grove that you have permission to use", brokerSummaries)
-		return "", store.ErrNotFound
-	}
-
-	// Case 4: Multiple providers - filter to dispatchable brokers, then require selection
+	// Case 3: filter to dispatchable brokers and auto-select when
+	// exactly one survives. Applies whether or not a default was set
+	// — an unhealthy default shouldn't change permission-checking
+	// semantics, just nudge selection to the next-best alternative.
 	var dispatchable []store.RuntimeBroker
 	for _, h := range availableBrokers {
 		if s.canDispatchToBroker(ctx, &h) {
@@ -8602,12 +8599,50 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 
 	switch len(dispatchable) {
 	case 0:
-		NoRuntimeBroker(w, "No runtime brokers available for this grove; register a runtime broker first", brokerSummaries)
+		// Last-ditch fallback: if availableBrokers came up empty
+		// (e.g. all providers have stale provider.Status that doesn't
+		// match the underlying broker.Status, or the freshly-linked
+		// provider hasn't had its first heartbeat counted yet), try
+		// to use the single provider's broker directly when the
+		// broker itself is online and dispatchable. This preserves
+		// the pre-refactor behavior where Case 3 would resolve a
+		// single provider against the broker registry rather than
+		// the provider Status field.
+		if len(allProviders) == 1 {
+			broker, brokerErr := s.store.GetRuntimeBroker(ctx, allProviders[0].BrokerID)
+			if brokerErr == nil && broker.Status == store.BrokerStatusOnline && s.canDispatchToBroker(ctx, broker) {
+				if grove.DefaultRuntimeBrokerID == "" {
+					grove.DefaultRuntimeBrokerID = broker.ID
+					if updateErr := s.store.UpdateGrove(ctx, grove); updateErr != nil {
+						slog.Warn("Failed to set grove default broker after single-provider auto-select",
+							"broker_id", broker.ID, "grove_id", grove.ID, "error", updateErr)
+					}
+				}
+				return broker.ID, nil
+			}
+		}
+		if len(availableBrokers) > 0 {
+			NoRuntimeBroker(w, "No runtime brokers available for this grove that you have permission to use", brokerSummaries)
+		} else {
+			NoRuntimeBroker(w, "No runtime brokers available for this grove; register a runtime broker first", brokerSummaries)
+		}
 		return "", store.ErrNotFound
 	case 1:
-		return dispatchable[0].ID, nil
+		picked := dispatchable[0].ID
+		// If the grove had no default at all (not just a stale one),
+		// opportunistically set this one so subsequent dispatches
+		// stay deterministic and `scion hub groves` shows the actual
+		// usable broker. We deliberately don't overwrite a stale
+		// default — operators may want to repair the original later.
+		if grove.DefaultRuntimeBrokerID == "" {
+			grove.DefaultRuntimeBrokerID = picked
+			if updateErr := s.store.UpdateGrove(ctx, grove); updateErr != nil {
+				slog.Warn("Failed to set grove default broker after auto-select",
+					"broker_id", picked, "grove_id", grove.ID, "error", updateErr)
+			}
+		}
+		return picked, nil
 	default:
-		// Multiple dispatchable brokers - require explicit selection
 		NoRuntimeBroker(w, "Multiple runtime brokers available for this grove; specify runtimeBrokerId to select one", brokerSummaries)
 		return "", store.ErrNotFound
 	}
