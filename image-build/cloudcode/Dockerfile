@@ -44,13 +44,20 @@ RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=/commandhisto
 # Mark this as a devcontainer-like environment for orientation.
 ENV DEVCONTAINER=true
 
-# Cloudcode stores its config + caches under ~/.config/cloudcode and
-# ~/.local/share/cloudcode. Pre-create with the right ownership so
-# the first run doesn't bail on permission errors.
+# Cloudcode stores config + caches + state across XDG dirs under
+# /home/scion: ~/.config/cloudcode, ~/.local/share/cloudcode, AND
+# ~/.local/state (used by Bun runtime for its log directory). The
+# scion-base image creates /home/scion as root-owned, so without an
+# explicit chown the first cloudcode run fails with EACCES on mkdir
+# '/home/scion/.local/state'. Pre-create the dirs AND make the whole
+# /home/scion subtree owned by the scion user so any other XDG paths
+# cloudcode discovers (XDG_RUNTIME_DIR, XDG_CACHE_HOME variants, etc.)
+# also resolve cleanly.
 RUN mkdir -p /home/${USERNAME}/.config/cloudcode \
              /home/${USERNAME}/.local/share/cloudcode \
-  && chown -R ${USERNAME}:${USERNAME} /home/${USERNAME}/.config/cloudcode \
-                                      /home/${USERNAME}/.local/share/cloudcode
+             /home/${USERNAME}/.local/state/cloudcode \
+             /home/${USERNAME}/.cache/cloudcode \
+  && chown -R ${USERNAME}:${USERNAME} /home/${USERNAME}
 
 # Install the cloudcode binary from the build context. Two-stage move
 # (COPY then install with mode) keeps the layer cacheable and avoids
