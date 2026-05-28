@@ -711,6 +711,32 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		}
 	}
 
+	// alteredCarbon brain env vars. Same plumbing as the local-spawn
+	// path in startAgent (above), but for the hub-dispatched path: we
+	// need to thread AC_DEFAULT_SCOPE / AC_SERVER_URL / AC_AUTH_TOKEN
+	// into req.Config.Env so the broker sets them on the agent
+	// container at spawn time. Without this, --scope is silently
+	// dropped when going via the hub.
+	effectiveACScope := acScope
+	if effectiveACScope == "" {
+		effectiveACScope = os.Getenv("AC_DEFAULT_SCOPE")
+	}
+	if effectiveACScope != "" {
+		if req.Config == nil {
+			req.Config = &api.ScionConfig{}
+		}
+		if req.Config.Env == nil {
+			req.Config.Env = make(map[string]string)
+		}
+		req.Config.Env["AC_DEFAULT_SCOPE"] = effectiveACScope
+		if v := os.Getenv("AC_SERVER_URL"); v != "" {
+			req.Config.Env["AC_SERVER_URL"] = v
+		}
+		if v := os.Getenv("AC_AUTH_TOKEN"); v != "" {
+			req.Config.Env["AC_AUTH_TOKEN"] = v
+		}
+	}
+
 	// Debug: log the env vars being sent with the create request
 	if debugMode {
 		util.Debugf("[env-gather] startAgentViaHub: building create request for agent %q", agentName)
