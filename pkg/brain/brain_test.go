@@ -19,10 +19,88 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+// TestResolveServerURL_EnvWins pins that AC_SERVER_URL takes
+// precedence over the on-disk config file. Operators sometimes
+// override per-shell (e.g. point at a staging brain) and the env
+// must win every time.
+func TestResolveServerURL_EnvWins(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// Plant a config file with a different URL than the env var.
+	cfgDir := filepath.Join(home, ".config", "altered-carbon")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatalf("mkdir cfg dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "server.json"),
+		[]byte(`{"url":"http://file-source.example/"}`), 0o644); err != nil {
+		t.Fatalf("write cfg: %v", err)
+	}
+	t.Setenv("AC_SERVER_URL", "http://env-source.example/")
+
+	if got := ResolveServerURL(); got != "http://env-source.example/" {
+		t.Fatalf("ResolveServerURL: got %q want env URL", got)
+	}
+}
+
+// TestResolveServerURL_FileFallback covers the common operator case:
+// they've run `ac auth set --url ...` once, AC_SERVER_URL is unset,
+// and scion start should still pick up the URL automatically.
+func TestResolveServerURL_FileFallback(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AC_SERVER_URL", "")
+	cfgDir := filepath.Join(home, ".config", "altered-carbon")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatalf("mkdir cfg dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "server.json"),
+		[]byte(`{"url":"http://from-file.example/"}`), 0o644); err != nil {
+		t.Fatalf("write cfg: %v", err)
+	}
+
+	if got := ResolveServerURL(); got != "http://from-file.example/" {
+		t.Fatalf("ResolveServerURL: got %q want file URL", got)
+	}
+}
+
+// TestResolveServerURL_EmptyWhenNothingConfigured ensures we return
+// "" (not an error, not a panic) when AC isn't configured at all.
+// Callers downstream rely on this to mean "AC is disabled here".
+func TestResolveServerURL_EmptyWhenNothingConfigured(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AC_SERVER_URL", "")
+	if got := ResolveServerURL(); got != "" {
+		t.Fatalf("ResolveServerURL: got %q want \"\"", got)
+	}
+}
+
+// TestResolveServerURL_MalformedFileIsSilent guards against partial
+// writes / corrupt config files turning every scion start into an
+// error. Bad JSON should behave the same as a missing file: "".
+func TestResolveServerURL_MalformedFileIsSilent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AC_SERVER_URL", "")
+	cfgDir := filepath.Join(home, ".config", "altered-carbon")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatalf("mkdir cfg dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "server.json"),
+		[]byte(`{not json`), 0o644); err != nil {
+		t.Fatalf("write cfg: %v", err)
+	}
+	if got := ResolveServerURL(); got != "" {
+		t.Fatalf("ResolveServerURL: got %q want \"\" on bad JSON", got)
+	}
+}
 
 // TestNewWithEmptyURLReturnsErrDisabled verifies the disabled-brain
 // path. Callers depend on this so they can do `b, err := New(cfg);

@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/brain"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
@@ -483,17 +484,19 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 			opts.Env = make(map[string]string)
 		}
 		opts.Env["AC_DEFAULT_SCOPE"] = effectiveACScope
-		// AC_SERVER_URL / AC_AUTH_TOKEN are passed through from the
-		// operator's host shell when present. Empty values mean "fall
-		// back to whatever the agent's scion-agent.yaml declares" —
-		// in particular, scion-agent.yaml can declare these with
-		// empty values to opt into implicit host-env passthrough at
-		// agent-start time. We deliberately don't error if they're
-		// unset on the host; AC integration is best-effort.
-		if v := os.Getenv("AC_SERVER_URL"); v != "" {
+		// AC_SERVER_URL / AC_AUTH_TOKEN come from the operator host
+		// via brain.ResolveServerURL / brain.ResolveAuthToken, which
+		// look at AC_SERVER_URL env first and then fall back to
+		// ~/.config/altered-carbon/server.json (what `ac auth set
+		// --url` writes). Operators who've configured `ac` no longer
+		// need to also export AC_SERVER_URL before every `scion
+		// start`. Empty values mean "fall back to whatever the
+		// agent's scion-agent.yaml declares" — AC integration is
+		// best-effort, so unset stays silent.
+		if v := brain.ResolveServerURL(); v != "" {
 			opts.Env["AC_SERVER_URL"] = v
 		}
-		if v := os.Getenv("AC_AUTH_TOKEN"); v != "" {
+		if v := brain.ResolveAuthToken(); v != "" {
 			opts.Env["AC_AUTH_TOKEN"] = v
 		}
 	}
@@ -729,10 +732,13 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 			req.Config.Env = make(map[string]string)
 		}
 		req.Config.Env["AC_DEFAULT_SCOPE"] = effectiveACScope
-		if v := os.Getenv("AC_SERVER_URL"); v != "" {
+		// Same resolve-from-env-or-config-file shape as the local
+		// startAgent path; see brain.ResolveServerURL for the lookup
+		// order.
+		if v := brain.ResolveServerURL(); v != "" {
 			req.Config.Env["AC_SERVER_URL"] = v
 		}
-		if v := os.Getenv("AC_AUTH_TOKEN"); v != "" {
+		if v := brain.ResolveAuthToken(); v != "" {
 			req.Config.Env["AC_AUTH_TOKEN"] = v
 		}
 	}

@@ -55,8 +55,11 @@ package brain
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	acapi "github.com/mattkorwel/alteredCarbon/pkg/api"
@@ -110,6 +113,58 @@ type Pointer struct {
 type Brain struct {
 	cfg    Config
 	client *acapi.Client
+}
+
+// ResolveServerURL returns the alteredCarbon server URL using the
+// canonical lookup order:
+//
+//  1. AC_SERVER_URL environment variable (wins outright when set)
+//  2. ~/.config/altered-carbon/server.json -> { "url": "..." }
+//     (where the operator's `ac` CLI stores its endpoint; this is
+//     what `ac auth set --url` writes)
+//
+// Empty string is returned when neither source has a value — callers
+// should treat that as "AC isn't configured here" rather than an
+// error, matching the Brain.Enabled() semantics elsewhere in this
+// package.
+//
+// Lives in the brain package (not cmd/) so the broker, operator CLI,
+// in-container `sciontool`, and any future consumer share one source
+// of truth for "where is the brain?" and operators never need to
+// also set AC_SERVER_URL when they've already run `ac auth set`.
+func ResolveServerURL() string {
+	if v := os.Getenv("AC_SERVER_URL"); v != "" {
+		return v
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	cfgPath := filepath.Join(home, ".config", "altered-carbon", "server.json")
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return ""
+	}
+	var cfg struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return ""
+	}
+	return cfg.URL
+}
+
+// ResolveAuthToken returns the alteredCarbon bearer token using the
+// canonical lookup order:
+//
+//  1. AC_AUTH_TOKEN environment variable
+//  2. (future) ~/.config/altered-carbon/auth.json — not yet defined
+//     by the ac CLI, so today this is just an env-var lookup
+//
+// Returns empty string when no token is configured (which is the
+// expected state for dev/loopback brains).
+func ResolveAuthToken() string {
+	return os.Getenv("AC_AUTH_TOKEN")
 }
 
 // New constructs a Brain from cfg. If cfg.URL is empty, returns
