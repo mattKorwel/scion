@@ -16,6 +16,8 @@ package runtimebroker
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -25,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/harnessconfigsync"
 )
 
 // startContext holds all the resolved state needed to start an agent.
@@ -389,6 +392,37 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 
 	if templateSlug != "" {
 		opts.TemplateName = templateSlug
+	}
+
+	// --- Harness-config hydration ---
+	// Brokers historically only resolved harness-configs from local disk
+	// (~/.scion/harness-configs/<name>/), so a dispatch for a name only
+	// the operator had `scion harness-config push`ed would fail with
+	// "harness-config %q not found". Mirror the template-hydration
+	// pattern: when the dispatch names a harness-config the broker
+	// doesn't have on disk, fetch it from the Hub and install it under
+	// the broker's global ~/.scion/harness-configs/ before provision
+	// runs. Idempotent: if it's already on disk, EnsureLocal is a no-op.
+	if hubConn != nil && hubConn.HubClient != nil && opts.HarnessConfig != "" {
+		if _, err := harnessconfigsync.EnsureLocal(ctx, hubConn.HubClient, opts.HarnessConfig); err != nil {
+			// ErrNotOnHub is not retryable — surface as a 400 so the
+			// CLI can show a clean error instead of a transient-looking
+			// 500. Other errors (network, hash mismatch) stay 500.
+			status := http.StatusInternalServerError
+			if errors.Is(err, harnessconfigsync.ErrNotOnHub) {
+				status = http.StatusBadRequest
+			}
+			return nil, &startContextError{
+				Status:      status,
+				Message:     fmt.Sprintf("Failed to hydrate harness-config %q: %v", opts.HarnessConfig, err),
+				IsHubError:  !errors.Is(err, harnessconfigsync.ErrNotOnHub),
+				OriginalErr: err,
+			}
+		}
+		if s.config.Debug {
+			s.agentLifecycleLog.Debug("Harness-config ensured present",
+				"agent_id", in.AgentID, "harness_config", opts.HarnessConfig)
+		}
 	}
 
 	// --- Shared workspace mode (git-workspace hybrid) ---
