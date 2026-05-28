@@ -69,11 +69,13 @@ func (s *Server) handleAgentPTY(w http.ResponseWriter, r *http.Request) {
 	// Check authentication - support both Bearer token and ticket parameter
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
-		// Check for ticket parameter (for browser clients)
+		// Check for ticket parameter (for browser clients). Tickets
+		// are scoped to a specific agent at mint time; mismatch
+		// rejects (single-use is still consumed by validatePTYTicket
+		// to prevent enumeration attacks).
 		ticket := r.URL.Query().Get("ticket")
 		if ticket != "" {
-			// Validate ticket (single-use token)
-			identity = s.validatePTYTicket(ctx, ticket)
+			identity = s.validatePTYTicketForAgent(ctx, ticket, agentID)
 		}
 	}
 
@@ -164,14 +166,123 @@ func extractAgentIDFromPTYPath(path string) string {
 	return path
 }
 
-// validatePTYTicket validates a single-use PTY ticket.
-// Returns the identity associated with the ticket, or nil if invalid.
-func (s *Server) validatePTYTicket(ctx context.Context, ticket string) Identity {
-	// For now, tickets are not implemented - return nil
-	// TODO: Implement ticket validation for browser clients
+// validatePTYTicketForAgent validates a single-use PTY ticket against
+// a specific agent ID and returns the identity associated with it.
+// Returns nil when the ticket is unknown, expired, already redeemed,
+// or was minted for a different agent than the one this PTY request
+// is opening.
+//
+// Tickets are stored in-memory on the Server (ptyTickets map). The
+// trade-off: a hub restart invalidates all outstanding tickets, and
+// the ticket is bound to the issuing hub instance (no cross-replica
+// dispatch). Both are acceptable for the current single-hub
+// deployment; revisit when we have multi-hub HA.
+//
+// Ticket lifecycle:
+//   - minted by handleMintPTYTicket on POST .../pty/ticket
+//   - consumed by validatePTYTicketForAgent on GET .../pty?ticket=...
+//   - expires after ptyTicketTTL (60s) regardless of consumption
+//   - removed from the map on consumption (single-use, always —
+//     even on agent-ID mismatch, so the ticket can't be brute-forced
+//     against multiple agents)
+func (s *Server) validatePTYTicketForAgent(ctx context.Context, ticket, agentID string) Identity {
 	_ = ctx
-	_ = ticket
-	return nil
+	if ticket == "" {
+		return nil
+	}
+	s.ptyTicketsMu.Lock()
+	defer s.ptyTicketsMu.Unlock()
+	if s.ptyTickets == nil {
+		return nil
+	}
+	entry, ok := s.ptyTickets[ticket]
+	if !ok {
+		return nil
+	}
+	// Single-use: always delete on lookup, regardless of validity.
+	delete(s.ptyTickets, ticket)
+	if time.Now().After(entry.expiresAt) {
+		return nil
+	}
+	if entry.agentID != "" && entry.agentID != agentID {
+		return nil
+	}
+	return entry.identity
+}
+
+// ptyTicketTTL caps how long a PTY ticket remains valid after issue.
+// 60s is long enough for any sane browser to immediately follow the
+// POST with the WebSocket upgrade, short enough that a leaked ticket
+// in a log line stops being useful quickly.
+const ptyTicketTTL = 60 * time.Second
+
+// handleMintPTYTicket issues a single-use, short-lived ticket the
+// browser can pass as a query parameter when opening the PTY
+// WebSocket. Standard WebSocket clients can't set Authorization
+// headers, so this two-step shape is the conventional workaround.
+//
+// Requirements: caller must be authenticated (Bearer/session) and
+// must pass the same authz check as a direct PTY connection — we
+// don't want to widen access via the ticket flow.
+//
+// Response body: {"ticket":"<opaque>", "expiresInSeconds": 60}.
+func (s *Server) handleMintPTYTicket(w http.ResponseWriter, r *http.Request, agentID string) {
+	ctx := r.Context()
+
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "Authentication required", nil)
+		return
+	}
+
+	agent, err := s.store.GetAgent(ctx, agentID)
+	if err != nil {
+		NotFound(w, "Agent")
+		return
+	}
+
+	// Same authz gate as the direct PTY path. Keeping it here means
+	// "can the caller open a PTY?" stays a single decision regardless
+	// of whether the actual WebSocket open happens 50ms later via
+	// ticket.
+	if user := GetUserIdentityFromContext(ctx); user != nil {
+		decision := s.authzService.CheckAccess(ctx, user, agentResource(agent), ActionAttach)
+		if !decision.Allowed {
+			slog.Warn("PTY ticket denied: policy check failed",
+				"agent_id", agentID,
+				"userID", user.ID(),
+				"reason", decision.Reason)
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
+			return
+		}
+	}
+
+	ticket := uuid.NewString()
+	s.ptyTicketsMu.Lock()
+	if s.ptyTickets == nil {
+		s.ptyTickets = make(map[string]ptyTicketEntry)
+	}
+	s.ptyTickets[ticket] = ptyTicketEntry{
+		identity:  identity,
+		agentID:   agentID,
+		expiresAt: time.Now().Add(ptyTicketTTL),
+	}
+	// Opportunistic GC: drop any expired tickets we trip over.
+	// Cheap because the map stays small (one per attach attempt).
+	now := time.Now()
+	for k, v := range s.ptyTickets {
+		if now.After(v.expiresAt) {
+			delete(s.ptyTickets, k)
+		}
+	}
+	s.ptyTicketsMu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"ticket":           ticket,
+		"expiresInSeconds": int(ptyTicketTTL / time.Second),
+	})
 }
 
 // PTYSession manages a PTY WebSocket session.

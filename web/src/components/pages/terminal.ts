@@ -343,7 +343,7 @@ export class ScionPageTerminal extends LitElement {
       // Wait for render, then initialize terminal
       await this.updateComplete;
       await this.initTerminal();
-      this.connectWebSocket();
+      await this.connectWebSocket();
     } catch (err) {
       console.error('Failed to load agent:', err);
       this.error = err instanceof Error ? err.message : 'Failed to load agent';
@@ -576,13 +576,42 @@ export class ScionPageTerminal extends LitElement {
     };
   }
 
-  private connectWebSocket(): void {
+  private async connectWebSocket(): Promise<void> {
     if (!this.terminal) return;
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${protocol}//${window.location.host}/api/v1/agents/${this.agentId}/pty?cols=${this.terminal.cols}&rows=${this.terminal.rows}`;
+    // Browsers can't set Authorization headers on the WebSocket
+    // constructor, so we mint a short-lived single-use ticket via a
+    // normal authenticated POST first, then pass it as ?ticket=... on
+    // the ws open. Without this the hub returns 401 on the upgrade
+    // and the browser surfaces it as "code 1006 abnormal closure"
+    // with no useful clue. See pkg/hub/pty_handlers.go:handleMintPTYTicket.
+    let ticket: string;
+    try {
+      const ticketResp = await fetch(`/api/v1/agents/${this.agentId}/pty/ticket`, {
+        method: 'POST',
+        credentials: 'include',
+      });
+      if (!ticketResp.ok) {
+        const detail = await extractApiError(ticketResp, `HTTP ${ticketResp.status}`);
+        this.error = `Failed to authorize terminal: ${detail}`;
+        return;
+      }
+      const body = (await ticketResp.json()) as { ticket?: string };
+      if (!body.ticket) {
+        this.error = 'Failed to authorize terminal: empty ticket from hub';
+        return;
+      }
+      ticket = body.ticket;
+    } catch (err) {
+      console.error('[Terminal] Failed to mint PTY ticket', err);
+      this.error = err instanceof Error ? `Failed to authorize terminal: ${err.message}` : 'Failed to authorize terminal';
+      return;
+    }
 
-    console.debug('[Terminal] Connecting to', url);
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const url = `${protocol}//${window.location.host}/api/v1/agents/${this.agentId}/pty?ticket=${encodeURIComponent(ticket)}&cols=${this.terminal.cols}&rows=${this.terminal.rows}`;
+
+    console.debug('[Terminal] Connecting to PTY (ticket-authed)');
     this.socket = new WebSocket(url);
 
     this.socket.onopen = () => {

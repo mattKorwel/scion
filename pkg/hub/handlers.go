@@ -1351,9 +1351,23 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Handle PTY WebSocket connections
+	// Handle PTY WebSocket connections.
 	if action == "pty" && isWebSocketUpgrade(r) {
 		s.handleAgentPTY(w, r)
+		return
+	}
+
+	// Handle PTY ticket minting (POST /api/v1/agents/{id}/pty/ticket).
+	// Browsers can't send Authorization headers on a WebSocket
+	// constructor — the standard WebSocket API only accepts URL +
+	// subprotocols, not arbitrary headers — so the web UI follows a
+	// two-step flow:
+	//   1. POST .../pty/ticket  (with normal session cookie/bearer)
+	//      -> short-lived single-use ticket
+	//   2. Open ws .../pty?ticket=<value>  (no headers needed)
+	// validatePTYTicket on the ws side consumes the ticket.
+	if action == "pty/ticket" && r.Method == http.MethodPost {
+		s.handleMintPTYTicket(w, r, id)
 		return
 	}
 

@@ -540,6 +540,23 @@ type Server struct {
 
 	// Cached rate limit info from the most recent GitHub App API call
 	githubAppRateLimit *githubapp.RateLimitInfo
+
+	// PTY ticket store. Browsers can't set Authorization headers on a
+	// WebSocket constructor, so the web UI mints a short-lived
+	// single-use ticket via POST /api/v1/agents/{id}/pty/ticket and
+	// passes it as ?ticket=... on the WebSocket open. Map is keyed
+	// by opaque ticket string. See pty_handlers.go.
+	ptyTicketsMu sync.Mutex
+	ptyTickets   map[string]ptyTicketEntry
+}
+
+// ptyTicketEntry is a single-use ticket allowing a browser to upgrade
+// to a PTY WebSocket without sending an Authorization header. See
+// validatePTYTicket / handleMintPTYTicket for the lifecycle.
+type ptyTicketEntry struct {
+	identity  Identity
+	agentID   string
+	expiresAt time.Time
 }
 
 // New creates a new Hub API server.
