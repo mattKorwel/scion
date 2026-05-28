@@ -569,7 +569,15 @@ func expandTildeTarget(target, containerHome string) string {
 // up natively. So on darwin/windows we leave host.docker.internal in place
 // and return "" (no NetworkMode override).
 func ResolveDockerNetworking(runtimeName string, env map[string]string) string {
-	if runtimeName != "docker" {
+	// docker and podman share the same --network=host knob on Linux. The
+	// motivation for both is identical: the agent needs to reach the host
+	// loopback (gosso-proxy on 127.0.0.1:18181, the broker's hub mount on
+	// 127.0.0.1:8788, etc.). Without --network=host, podman's default
+	// rootless bridge resolves host.containers.internal to a 169.254.1.2
+	// shim that no process actually listens on, so HTTP_PROXY injection
+	// of the same hostname appears to work (env is set, DNS resolves) but
+	// every connection times out at the TCP layer.
+	if runtimeName != "docker" && runtimeName != "podman" {
 		return ""
 	}
 
@@ -604,15 +612,25 @@ func ResolveDockerNetworking(runtimeName string, env map[string]string) string {
 
 	// Linux below.
 
-	// If endpoint uses the Docker bridge hostname (translated from localhost),
-	// rewrite back to localhost since host networking makes it reachable directly.
-	if strings.Contains(ep, "host.docker.internal") {
-		for _, key := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL"} {
-			if v, ok := env[key]; ok {
-				env[key] = strings.Replace(v, "host.docker.internal", "localhost", 1)
+	// If endpoint uses a known host-bridge hostname (translated from
+	// localhost earlier in the pipeline), rewrite back to localhost since
+	// host networking makes it reachable directly. Also rewrite
+	// HTTP_PROXY / HTTPS_PROXY / http_proxy / https_proxy so the
+	// container hits the host's 127.0.0.1 gosso-proxy directly instead
+	// of trying to dial host.containers.internal (a 169.254.x shim in
+	// rootless podman that nothing listens on).
+	for _, bridge := range []string{"host.docker.internal", "host.containers.internal"} {
+		if strings.Contains(ep, bridge) {
+			for _, key := range []string{
+				"SCION_HUB_ENDPOINT", "SCION_HUB_URL",
+				"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+			} {
+				if v, ok := env[key]; ok {
+					env[key] = strings.Replace(v, bridge, "localhost", 1)
+				}
 			}
+			return "host"
 		}
-		return "host"
 	}
 
 	// If endpoint is localhost, containers need host networking to reach it.
@@ -622,6 +640,17 @@ func ResolveDockerNetworking(runtimeName string, env map[string]string) string {
 	}
 	host := u.Hostname()
 	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+		// Also restore HTTP_PROXY env if it was bridge-translated by
+		// EnsureCorpProxyEnv earlier — with host networking the
+		// container can dial 127.0.0.1:18181 directly.
+		for _, key := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"} {
+			if v, ok := env[key]; ok {
+				for _, bridge := range []string{"host.docker.internal", "host.containers.internal"} {
+					v = strings.Replace(v, bridge, "localhost", 1)
+				}
+				env[key] = v
+			}
+		}
 		return "host"
 	}
 

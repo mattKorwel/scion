@@ -664,15 +664,6 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		delete(opts.Env, "SCION_AUTH_TOKEN")
 	}
 
-	// Resolve Docker host networking: when the hub endpoint is localhost or was
-	// translated to host.docker.internal, use --network=host so the container
-	// can reach the host's loopback interface directly. This also rewrites any
-	// bridge hostnames back to localhost in opts.Env.
-	dockerNetworkMode := runtime.ResolveDockerNetworking(m.Runtime.Name(), opts.Env)
-	if dockerNetworkMode != "" {
-		opts.Env["SCION_NETWORK_MODE"] = dockerNetworkMode
-	}
-
 	// Inject HTTP_PROXY for in-container AC client when AC_SERVER_URL points
 	// at a corp UberProxy-fronted host. Without this, `ac` inside the agent
 	// container can't reach the brain (corp DNS isn't resolvable; even when
@@ -681,9 +672,25 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// container-reachable address (host.docker.internal etc.) and sets
 	// NO_PROXY to exempt loopback + hub traffic. Pure env-map mutation;
 	// no-op when AC_SERVER_URL is unset or public.
+	//
+	// Runs BEFORE ResolveDockerNetworking on purpose: if we end up with
+	// host networking, ResolveDockerNetworking undoes the bridge
+	// translation HTTP_PROXY just got (host networking makes
+	// 127.0.0.1:18181 directly reachable from inside the container, no
+	// bridge hop needed).
 	if runtime.EnsureCorpProxyEnv(m.Runtime.Name(), opts.Env) {
 		util.Debugf("Start: injected HTTP_PROXY for corp AC_SERVER_URL=%s -> %s",
 			opts.Env["AC_SERVER_URL"], opts.Env["HTTP_PROXY"])
+	}
+
+	// Resolve Docker/Podman host networking: when the hub endpoint is
+	// localhost or was translated to a bridge hostname, use
+	// --network=host so the container can reach the host's loopback
+	// interface directly. This also rewrites any bridge hostnames in
+	// SCION_HUB_* and HTTP_PROXY back to localhost in opts.Env.
+	dockerNetworkMode := runtime.ResolveDockerNetworking(m.Runtime.Name(), opts.Env)
+	if dockerNetworkMode != "" {
+		opts.Env["SCION_NETWORK_MODE"] = dockerNetworkMode
 	}
 
 	// Persist harness auth override to scion-agent.json so sciontool inside the container sees it.

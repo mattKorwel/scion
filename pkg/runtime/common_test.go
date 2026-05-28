@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	stdruntime "runtime"
 	"strings"
 	"testing"
 
@@ -1110,6 +1111,15 @@ func TestBridgeExtraHosts(t *testing.T) {
 }
 
 func TestResolveDockerNetworking(t *testing.T) {
+	// The tested function takes the linux branch only when runtime.GOOS
+	// == "linux". On darwin/windows it returns "" (no host mode) and
+	// rewrites localhost endpoints to host.docker.internal instead.
+	// Pre-existing test cases below assume linux; gate accordingly so
+	// the suite still works on developer macs.
+	if stdruntime.GOOS != "linux" {
+		t.Skipf("ResolveDockerNetworking assertions assume linux (got %s)", stdruntime.GOOS)
+	}
+
 	tests := []struct {
 		name        string
 		runtimeName string
@@ -1161,12 +1171,28 @@ func TestResolveDockerNetworking(t *testing.T) {
 			wantMode:    "",
 		},
 		{
-			name:        "podman is not affected",
+			// As of 2026-05 podman also goes through ResolveDockerNetworking
+			// so containers can dial the broker's host loopback. Without
+			// --network=host, podman's rootless bridge maps
+			// host.containers.internal to a 169.254.x shim that nothing
+			// listens on (DNS resolves but TCP never connects), making
+			// HTTP_PROXY=http://host.containers.internal:18181 silently
+			// time out from inside the agent.
+			name:        "podman with localhost endpoint",
 			runtimeName: "podman",
 			env: map[string]string{
 				"SCION_HUB_ENDPOINT": "http://localhost:8080",
 			},
-			wantMode: "",
+			wantMode: "host",
+			wantEP:   "http://localhost:8080",
+		},
+		{
+			name:        "podman with bridge hostname rewrites to localhost",
+			runtimeName: "podman",
+			env: map[string]string{
+				"SCION_HUB_ENDPOINT": "http://host.containers.internal:8080",
+			},
+			wantMode: "host",
 			wantEP:   "http://localhost:8080",
 		},
 		{
