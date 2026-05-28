@@ -107,8 +107,32 @@ builder_run_target() {
   # Only pass substitutions that the template actually references.
   # Cloud Build rejects any key in --substitutions that is not matched
   # (referenced) in the template steps.
-  local short_sha="${SHORT_SHA:-unknown}"
-  local commit_sha="${COMMIT_SHA:-unknown}"
+  #
+  # SHORT_SHA / COMMIT_SHA are auto-populated by Cloud Build only when a
+  # build is triggered from a git revision (e.g. a GitHub trigger). For
+  # local `gcloud builds submit` invocations (the usual scion-apply
+  # path) they're empty, and would collapse to literal "unknown" — which
+  # is fine for a one-off but causes successive runs to clobber each
+  # other's `:unknown` tag in Artifact Registry. Auto-detect from
+  # ${REPO_ROOT}'s git state when not set, so independent submits get
+  # distinct tags.
+  local short_sha="${SHORT_SHA:-}"
+  local commit_sha="${COMMIT_SHA:-}"
+  if [[ -z "${short_sha}" || -z "${commit_sha}" ]]; then
+    if command -v git >/dev/null 2>&1; then
+      local detected
+      detected="$(git -C "${REPO_ROOT}" rev-parse --short=8 HEAD 2>/dev/null)" || detected=""
+      if [[ -n "${detected}" ]]; then
+        short_sha="${short_sha:-${detected}}"
+      fi
+      detected="$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null)" || detected=""
+      if [[ -n "${detected}" ]]; then
+        commit_sha="${commit_sha:-${detected}}"
+      fi
+    fi
+  fi
+  : "${short_sha:=unknown}"
+  : "${commit_sha:=unknown}"
 
   local subs="_TAG=${tag}"
   if grep -q '_SHORT_SHA' "${config}"; then
