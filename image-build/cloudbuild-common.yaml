@@ -83,21 +83,31 @@ steps:
     env:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
 
-  # 3. Build Claude Harness Image
+  # 3. Build Cloudcode Harness Image
+  # NB: image-build/cloudcode/_bin/cloudcode (~489MB linux/amd64 prebuilt
+  # internal binary) must be staged into the build context before submit.
+  # On operator workstations, fleet-apply copies the binary from
+  # $cloudcode_linux to ~/dev/bin/cloudcode-linux-amd64; the
+  # image-build/scripts/stage-cloudcode.sh helper (or a manual cp) places
+  # it under image-build/cloudcode/_bin/cloudcode. No external network
+  # download — there's no public release URL for the binary.
+  #
+  # We use linux/amd64 only (single arch); the cloudcode binary is
+  # x86-64-only today and a multi-arch build would fail on the arm64 leg.
   - name: 'gcr.io/cloud-builders/docker'
-    id: 'build-scion-claude'
-    dir: 'image-build/claude'
+    id: 'build-scion-cloudcode'
+    dir: 'image-build/cloudcode'
     args:
       - 'buildx'
       - 'build'
       - '--platform'
-      - 'linux/amd64,linux/arm64'
+      - 'linux/amd64'
       - '--build-arg'
       - 'BASE_IMAGE=$_REGISTRY/scion-base:$_SHORT_SHA'
       - '-t'
-      - '$_REGISTRY/scion-claude:$_SHORT_SHA'
+      - '$_REGISTRY/scion-cloudcode:$_SHORT_SHA'
       - '-t'
-      - '$_REGISTRY/scion-claude:$_TAG'
+      - '$_REGISTRY/scion-cloudcode:$_TAG'
       - '-f'
       - 'Dockerfile'
       - '--pull'
@@ -106,53 +116,7 @@ steps:
     env:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
 
-  # 4. Build OpenCode Harness Image
-  - name: 'gcr.io/cloud-builders/docker'
-    id: 'build-scion-opencode'
-    dir: 'image-build/opencode'
-    args:
-      - 'buildx'
-      - 'build'
-      - '--platform'
-      - 'linux/amd64,linux/arm64'
-      - '--build-arg'
-      - 'BASE_IMAGE=$_REGISTRY/scion-base:$_SHORT_SHA'
-      - '-t'
-      - '$_REGISTRY/scion-opencode:$_SHORT_SHA'
-      - '-t'
-      - '$_REGISTRY/scion-opencode:$_TAG'
-      - '-f'
-      - 'Dockerfile'
-      - '--pull'
-      - '--push'
-      - '.'
-    env:
-      - 'DOCKER_CLI_EXPERIMENTAL=enabled'
-
-  # 5. Build Codex Harness Image
-  - name: 'gcr.io/cloud-builders/docker'
-    id: 'build-scion-codex'
-    dir: 'image-build/codex'
-    args:
-      - 'buildx'
-      - 'build'
-      - '--platform'
-      - 'linux/amd64,linux/arm64'
-      - '--build-arg'
-      - 'BASE_IMAGE=$_REGISTRY/scion-base:$_SHORT_SHA'
-      - '-t'
-      - '$_REGISTRY/scion-codex:$_SHORT_SHA'
-      - '-t'
-      - '$_REGISTRY/scion-codex:$_TAG'
-      - '-f'
-      - 'Dockerfile'
-      - '--pull'
-      - '--push'
-      - '.'
-    env:
-      - 'DOCKER_CLI_EXPERIMENTAL=enabled'
-
-  # 6. Build Hub Image
+  # 4. Build Hub Image
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-scion-hub'
     dir: 'image-build/hub'

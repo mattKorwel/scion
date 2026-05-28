@@ -12,17 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Cloud Build configuration for building just the harness images
-# This builds on top of the existing scion-base:<_TAG> image (defaults to scion-base:latest)
-# Use this when you only need to update harness-specific configuration (claude, gemini, etc.)
+# Cloud Build configuration for rebuilding ONLY the harness images on top
+# of an already-published scion-base:<_TAG>. Use when you've changed a
+# harness Dockerfile or its baked-in binary and don't need to rebuild
+# scion-base itself.
+#
+# Pipeline: pull scion-base:<_TAG> -> build scion-gemini + scion-cloudcode.
+# scion-hub is excluded — it's published by cloudbuild-hub.yaml, not part
+# of the harness target.
 steps:
-  # Pre-flight: verify push access to catch permission errors early
   - name: 'gcr.io/cloud-builders/gcloud'
     id: 'verify-registry'
     entrypoint: 'bash'
     args: ['image-build/scripts/verify-registry.sh', '$_REGISTRY']
 
-  # Enable multi-arch builds
   - name: 'gcr.io/cloud-builders/docker'
     id: 'setup-buildx'
     args: ['buildx', 'create', '--name', 'mybuilder', '--use']
@@ -35,7 +38,8 @@ steps:
     env:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
 
-  # Build Gemini Harness Image
+  # Gemini harness (multi-arch — gemini-cli is a node package, no
+  # native binary).
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-scion-gemini'
     dir: 'image-build/gemini'
@@ -58,67 +62,24 @@ steps:
     env:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
 
-  # Build Claude Harness Image
+  # Cloudcode harness (linux/amd64 only — the prebuilt binary baked
+  # in from image-build/cloudcode/_bin/cloudcode is x86-64-only today).
+  # The binary must be present at submit time; see cloudbuild-common.yaml
+  # for the staging requirement.
   - name: 'gcr.io/cloud-builders/docker'
-    id: 'build-scion-claude'
-    dir: 'image-build/claude'
+    id: 'build-scion-cloudcode'
+    dir: 'image-build/cloudcode'
     args:
       - 'buildx'
       - 'build'
       - '--platform'
-      - 'linux/amd64,linux/arm64'
+      - 'linux/amd64'
       - '--build-arg'
       - 'BASE_IMAGE=$_REGISTRY/scion-base:$_TAG'
       - '-t'
-      - '$_REGISTRY/scion-claude:$_SHORT_SHA'
+      - '$_REGISTRY/scion-cloudcode:$_SHORT_SHA'
       - '-t'
-      - '$_REGISTRY/scion-claude:$_TAG'
-      - '-f'
-      - 'Dockerfile'
-      - '--pull'
-      - '--push'
-      - '.'
-    env:
-      - 'DOCKER_CLI_EXPERIMENTAL=enabled'
-
-  # Build OpenCode Harness Image
-  - name: 'gcr.io/cloud-builders/docker'
-    id: 'build-scion-opencode'
-    dir: 'image-build/opencode'
-    args:
-      - 'buildx'
-      - 'build'
-      - '--platform'
-      - 'linux/amd64,linux/arm64'
-      - '--build-arg'
-      - 'BASE_IMAGE=$_REGISTRY/scion-base:$_TAG'
-      - '-t'
-      - '$_REGISTRY/scion-opencode:$_SHORT_SHA'
-      - '-t'
-      - '$_REGISTRY/scion-opencode:$_TAG'
-      - '-f'
-      - 'Dockerfile'
-      - '--pull'
-      - '--push'
-      - '.'
-    env:
-      - 'DOCKER_CLI_EXPERIMENTAL=enabled'
-
-  # Build Codex Harness Image
-  - name: 'gcr.io/cloud-builders/docker'
-    id: 'build-scion-codex'
-    dir: 'image-build/codex'
-    args:
-      - 'buildx'
-      - 'build'
-      - '--platform'
-      - 'linux/amd64,linux/arm64'
-      - '--build-arg'
-      - 'BASE_IMAGE=$_REGISTRY/scion-base:$_TAG'
-      - '-t'
-      - '$_REGISTRY/scion-codex:$_SHORT_SHA'
-      - '-t'
-      - '$_REGISTRY/scion-codex:$_TAG'
+      - '$_REGISTRY/scion-cloudcode:$_TAG'
       - '-f'
       - 'Dockerfile'
       - '--pull'
@@ -133,4 +94,4 @@ substitutions:
 options:
   dynamicSubstitutions: true
   machineType: 'E2_HIGHCPU_8'
-timeout: 1800s # 30 minutes - harnesses are lightweight
+timeout: 3600s

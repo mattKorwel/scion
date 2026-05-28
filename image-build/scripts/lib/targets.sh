@@ -21,16 +21,28 @@
 #
 # Builders never read this file. The orchestrator translates step descriptors
 # into the uniform builder_build call.
+#
+# Harness images shipped by the fleet (2026-05-28):
+#   - scion-gemini      gemini-cli, npm-installed from public registry
+#   - scion-cloudcode   cloudcode, internal prebuilt linux binary baked in
+#                       from image-build/cloudcode/_bin/cloudcode
+#   - scion-jetski      INTENTIONALLY ABSENT. Jetski runs via the host's
+#                       /usr/bin/jetski bind-mounted into a scion-base
+#                       container — see harness-configs/jetski/config.yaml.
+#                       Building it as a self-contained image would require
+#                       corp apt access from inside the build context,
+#                       which Cloud Build's default network can't provide.
+#
+# Previously-built harness images (scion-claude, scion-codex, scion-opencode)
+# were removed in this CL — operator-side allowed set is gemini/cloudcode/jetski.
 
 # All known step IDs. The step ID is also the published image name
 # (without registry prefix).
 ALL_STEP_IDS=(
   core-base
   scion-base
-  scion-claude
   scion-gemini
-  scion-opencode
-  scion-codex
+  scion-cloudcode
   scion-hub
 )
 
@@ -58,16 +70,16 @@ resolve_targets() {
       echo scion-base
       ;;
     harnesses)
-      printf '%s\n' scion-claude scion-gemini scion-opencode scion-codex
+      printf '%s\n' scion-gemini scion-cloudcode
       ;;
     hub)
       echo scion-hub
       ;;
     common)
-      printf '%s\n' scion-base scion-claude scion-gemini scion-opencode scion-codex scion-hub
+      printf '%s\n' scion-base scion-gemini scion-cloudcode scion-hub
       ;;
     all)
-      printf '%s\n' core-base scion-base scion-claude scion-gemini scion-opencode scion-codex scion-hub
+      printf '%s\n' core-base scion-base scion-gemini scion-cloudcode scion-hub
       ;;
     *)
       return 1
@@ -86,13 +98,11 @@ step_image_name() {
 # IMAGE_BUILD_DIR to be set in the environment.
 step_dockerfile() {
   case "$1" in
-    core-base)     echo "${IMAGE_BUILD_DIR}/core-base/Dockerfile" ;;
-    scion-base)    echo "${IMAGE_BUILD_DIR}/scion-base/Dockerfile" ;;
-    scion-claude)  echo "${IMAGE_BUILD_DIR}/claude/Dockerfile" ;;
-    scion-gemini)  echo "${IMAGE_BUILD_DIR}/gemini/Dockerfile" ;;
-    scion-opencode) echo "${IMAGE_BUILD_DIR}/opencode/Dockerfile" ;;
-    scion-codex)   echo "${IMAGE_BUILD_DIR}/codex/Dockerfile" ;;
-    scion-hub)     echo "${IMAGE_BUILD_DIR}/hub/Dockerfile" ;;
+    core-base)       echo "${IMAGE_BUILD_DIR}/core-base/Dockerfile" ;;
+    scion-base)      echo "${IMAGE_BUILD_DIR}/scion-base/Dockerfile" ;;
+    scion-gemini)    echo "${IMAGE_BUILD_DIR}/gemini/Dockerfile" ;;
+    scion-cloudcode) echo "${IMAGE_BUILD_DIR}/cloudcode/Dockerfile" ;;
+    scion-hub)       echo "${IMAGE_BUILD_DIR}/hub/Dockerfile" ;;
     *) return 1 ;;
   esac
 }
@@ -104,13 +114,11 @@ step_dockerfile() {
 # own image-build subdirectory.
 step_context_dir() {
   case "$1" in
-    core-base)     echo "${IMAGE_BUILD_DIR}/core-base" ;;
-    scion-base)    echo "${REPO_ROOT}" ;;
-    scion-claude)  echo "${IMAGE_BUILD_DIR}/claude" ;;
-    scion-gemini)  echo "${IMAGE_BUILD_DIR}/gemini" ;;
-    scion-opencode) echo "${IMAGE_BUILD_DIR}/opencode" ;;
-    scion-codex)   echo "${IMAGE_BUILD_DIR}/codex" ;;
-    scion-hub)     echo "${IMAGE_BUILD_DIR}/hub" ;;
+    core-base)       echo "${IMAGE_BUILD_DIR}/core-base" ;;
+    scion-base)      echo "${REPO_ROOT}" ;;
+    scion-gemini)    echo "${IMAGE_BUILD_DIR}/gemini" ;;
+    scion-cloudcode) echo "${IMAGE_BUILD_DIR}/cloudcode" ;;
+    scion-hub)       echo "${IMAGE_BUILD_DIR}/hub" ;;
     *) return 1 ;;
   esac
 }
@@ -138,7 +146,7 @@ step_build_args() {
         echo "GIT_COMMIT=${COMMIT_SHA}"
       fi
       ;;
-    scion-claude|scion-gemini|scion-opencode|scion-codex|scion-hub)
+    scion-gemini|scion-cloudcode|scion-hub)
       echo "BASE_IMAGE=${prefix}scion-base:${BASE_TAG}"
       ;;
     *) return 1 ;;
@@ -152,9 +160,9 @@ step_build_args() {
 # right :tag fallback for standalone targets.
 step_parent() {
   case "$1" in
-    core-base)     echo "" ;;
-    scion-base)    echo "core-base" ;;
-    scion-claude|scion-gemini|scion-opencode|scion-codex|scion-hub)
+    core-base)       echo "" ;;
+    scion-base)      echo "core-base" ;;
+    scion-gemini|scion-cloudcode|scion-hub)
       echo "scion-base"
       ;;
     *) return 1 ;;

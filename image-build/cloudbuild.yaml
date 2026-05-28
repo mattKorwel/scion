@@ -128,67 +128,24 @@ steps:
     env:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
 
-  # 4. Build Claude Harness Image
+  # 4. Build Cloudcode Harness Image
+  # See cloudbuild-common.yaml for the staging requirement (the cloudcode
+  # linux binary must be present at image-build/cloudcode/_bin/cloudcode
+  # before submit). linux/amd64 only — the binary isn't multi-arch.
   - name: 'gcr.io/cloud-builders/docker'
-    id: 'build-scion-claude'
-    dir: 'image-build/claude'
+    id: 'build-scion-cloudcode'
+    dir: 'image-build/cloudcode'
     args:
       - 'buildx'
       - 'build'
       - '--platform'
-      - 'linux/amd64,linux/arm64'
+      - 'linux/amd64'
       - '--build-arg'
       - 'BASE_IMAGE=$_REGISTRY/scion-base:$_SHORT_SHA'
       - '-t'
-      - '$_REGISTRY/scion-claude:$_SHORT_SHA'
+      - '$_REGISTRY/scion-cloudcode:$_SHORT_SHA'
       - '-t'
-      - '$_REGISTRY/scion-claude:$_TAG'
-      - '-f'
-      - 'Dockerfile'
-      - '--pull'
-      - '--push'
-      - '.'
-    env:
-      - 'DOCKER_CLI_EXPERIMENTAL=enabled'
-
-  # 5. Build OpenCode Harness Image
-  - name: 'gcr.io/cloud-builders/docker'
-    id: 'build-scion-opencode'
-    dir: 'image-build/opencode'
-    args:
-      - 'buildx'
-      - 'build'
-      - '--platform'
-      - 'linux/amd64,linux/arm64'
-      - '--build-arg'
-      - 'BASE_IMAGE=$_REGISTRY/scion-base:$_SHORT_SHA'
-      - '-t'
-      - '$_REGISTRY/scion-opencode:$_SHORT_SHA'
-      - '-t'
-      - '$_REGISTRY/scion-opencode:$_TAG'
-      - '-f'
-      - 'Dockerfile'
-      - '--pull'
-      - '--push'
-      - '.'
-    env:
-      - 'DOCKER_CLI_EXPERIMENTAL=enabled'
-
-  # 6. Build Codex Harness Image
-  - name: 'gcr.io/cloud-builders/docker'
-    id: 'build-scion-codex'
-    dir: 'image-build/codex'
-    args:
-      - 'buildx'
-      - 'build'
-      - '--platform'
-      - 'linux/amd64,linux/arm64'
-      - '--build-arg'
-      - 'BASE_IMAGE=$_REGISTRY/scion-base:$_SHORT_SHA'
-      - '-t'
-      - '$_REGISTRY/scion-codex:$_SHORT_SHA'
-      - '-t'
-      - '$_REGISTRY/scion-codex:$_TAG'
+      - '$_REGISTRY/scion-cloudcode:$_TAG'
       - '-f'
       - 'Dockerfile'
       - '--pull'

@@ -6,15 +6,16 @@ Dockerfiles and build configurations for Scion container images.
 
 ```
 core-base          System dependencies (Go, Node, Python)
-  └── scion-base   Adds sciontool binary and scion user
-        ├── claude     Claude Code harness
-        ├── gemini     Gemini CLI harness
-        ├── opencode   OpenCode harness
-        ├── codex      Codex harness
+  └── scion-base   Adds sciontool binary, the ac binary, and the scion user
+        ├── gemini     Gemini CLI harness (gemini-cli, npm)
+        ├── cloudcode  Cloudcode harness (internal prebuilt linux binary
+        │              from image-build/cloudcode/_bin/cloudcode)
         └── hub        Scion hub server
 ```
 
 Each harness directory (and `hub/`) contains a `Dockerfile` that extends `scion-base` with image-specific tooling.
+
+**Jetski** is the third supported harness but is intentionally NOT built as its own image — `gemini-agents-jetski.deb` requires corp apt access at build time which Cloud Build's default network can't provide. Instead the jetski harness-config (`~/.scion/harness-configs/jetski/config.yaml`) bind-mounts the broker host's already-installed `/usr/bin/jetski` and `/usr/grte/v5/` into a `scion-base` container at agent start.
 
 ## Scripts
 
@@ -48,7 +49,7 @@ The orchestrator owns target sequencing, tag computation, and BASE_IMAGE threadi
 |---|---|---|
 | `core-base` | `core-base` | Foundation tools layer. |
 | `scion-base` | `scion-base` | Adds sciontool. Uses existing `core-base:<tag>`. |
-| `harnesses` | `scion-claude`, `scion-gemini`, `scion-opencode`, `scion-codex` | Uses existing `scion-base:<tag>`. |
+| `harnesses` | `scion-gemini`, `scion-cloudcode` | Uses existing `scion-base:<tag>`. |
 | `hub` | `scion-hub` | Hub server image. Uses existing `scion-base:<tag>`. |
 | `common` (default) | `scion-base` + harnesses + hub | Skips `core-base`. Most common rebuild. |
 | `all` | Full DAG | Rebuilds everything from `core-base`. |
@@ -62,7 +63,7 @@ When two steps in the same run depend on each other, the orchestrator threads `B
 ### Quick Start: Build Your Own Images
 
 ```bash
-# Build locally without ever pushing — bare tags (scion-claude:latest, etc.)
+# Build locally without ever pushing — bare tags (scion-gemini:latest, etc.)
 # land in your local engine's image store. Default builder: local-docker.
 image-build/scripts/build-images.sh --target all
 

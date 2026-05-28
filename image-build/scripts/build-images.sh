@@ -53,7 +53,7 @@ Options:
   --registry <path>     Target registry path (e.g., ghcr.io/myorg).
                         Required when --push is set or with --builder cloud-build.
                         When omitted, images are tagged with bare names
-                        (e.g., scion-claude:latest) and stay in the local store.
+                        (e.g., scion-gemini:latest) and stay in the local store.
   --builder <name>      Build backend (default: local-docker)
                           local-docker  - docker buildx, local
                           local-podman  - podman build, local (single-arch by default)
@@ -139,7 +139,7 @@ if [[ "${PLATFORMS}" == *","* && "${PUSH}" != "true" ]]; then
 fi
 
 # --registry is required for any path that publishes images. Without it,
-# we tag with bare names (scion-claude:latest) and the images stay local.
+# we tag with bare names (scion-gemini:latest) and the images stay local.
 if [[ -z "${REGISTRY}" ]]; then
   if [[ "${BUILDER}" == "cloud-build" ]]; then
     echo "Error: --registry is required with --builder cloud-build" >&2
@@ -236,7 +236,7 @@ resolve_base_tag() {
 
 # Build the comma-separated tag list for an image: always :<tag>, plus
 # :<short-sha> when available. Omits the registry prefix when REGISTRY is
-# empty (local-only build), so tags are bare like "scion-claude:latest".
+# empty (local-only build), so tags are bare like "scion-gemini:latest".
 compute_tags() {
   local image_name="$1"
   local prefix=""

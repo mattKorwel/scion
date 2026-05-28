@@ -1,0 +1,4 @@
+# The cloudcode binary is staged into _bin/ by
+# scripts/stage-cloudcode.sh before build. It's an internal prebuilt
+# distributed via fleet-apply, not source-controlled.
+_bin/
