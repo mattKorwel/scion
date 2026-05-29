@@ -30,9 +30,9 @@ export REPO_ROOT IMAGE_BUILD_DIR
 
 # Hard-coded builder allow-list. Adding a new builder requires both an edit
 # here and a new file under builders/.
-ALLOWED_BUILDERS=(local-docker local-podman cloud-build)
+ALLOWED_BUILDERS=(auto local-docker local-podman cloud-build)
 
-BUILDER="local-docker"
+BUILDER="auto"
 REGISTRY=""
 TARGET="common"
 TAG="latest"
@@ -54,10 +54,16 @@ Options:
                         Required when --push is set or with --builder cloud-build.
                         When omitted, images are tagged with bare names
                         (e.g., scion-gemini:latest) and stay in the local store.
-  --builder <name>      Build backend (default: local-docker)
-                          local-docker  - docker buildx, local
+  --builder <name>      Build backend (default: auto)
+                          auto          - cloud-build when gcloud is configured + has the
+                                          target project, else local-docker. Multi-arch
+                                          (linux/amd64+arm64) automatically when cloud-build
+                                          is picked. Best default for most operators.
+                          local-docker  - docker buildx, local (host arch by default;
+                                          slow under QEMU emulation for cross-arch)
                           local-podman  - podman build, local (single-arch by default)
-                          cloud-build   - Google Cloud Build (submits a static cloudbuild-*.yaml)
+                          cloud-build   - Google Cloud Build (submits a static
+                                          cloudbuild-*.yaml; needs --registry + gcloud auth)
   --target <target>     Build target (default: common)
                           core-base   - just the core-base layer
                           scion-base  - just scion-base (uses existing core-base:<tag>)
@@ -111,6 +117,48 @@ if [[ "${builder_ok}" != "true" ]]; then
   echo "Error: unknown --builder '${BUILDER}'" >&2
   echo "Allowed: ${ALLOWED_BUILDERS[*]}" >&2
   exit 1
+fi
+
+# Resolve --builder auto into a concrete backend BEFORE we look at any
+# other validation that branches on builder name. Decision rule (in
+# order, first match wins):
+#
+#   1. cloud-build when ALL of:
+#        - --registry was passed (cloud-build can't publish anywhere
+#          else; an unset registry means the caller wants a local
+#          build for testing, not a remote push)
+#        - gcloud CLI is on PATH
+#        - GCLOUD_PROJECT env var is set OR `gcloud config get-value
+#          project` returns a non-empty value (cloud-build needs to
+#          know which project to bill / publish from)
+#      Rationale: cloud-build on Google infrastructure has fast
+#      network access to the registry, builds multi-arch by default
+#      via the cloudbuild-*.yaml's hardcoded
+#      `--platform linux/amd64,linux/arm64`, and doesn't tie up the
+#      operator's laptop CPU + battery. This is the right default
+#      whenever it's actually reachable.
+#
+#   2. local-docker otherwise. Docker buildx works without external
+#      dependencies; the cost is single-arch by default (operator
+#      can pass --platform all to force multi-arch, but that pulls
+#      in QEMU emulation on cross-arch and is glacially slow).
+#
+# The previous default (local-docker) silently produced single-arch
+# images that cattle of a different architecture couldn't pull —
+# the exact failure mode that motivated this auto-resolution.
+if [[ "${BUILDER}" == "auto" ]]; then
+  resolved="local-docker"
+  if [[ -n "${REGISTRY}" ]] && command -v gcloud >/dev/null 2>&1; then
+    proj="${GCLOUD_PROJECT:-${CLOUDSDK_CORE_PROJECT:-}}"
+    if [[ -z "${proj}" ]]; then
+      proj="$(gcloud config get-value project 2>/dev/null || true)"
+    fi
+    if [[ -n "${proj}" && "${proj}" != "(unset)" ]]; then
+      resolved="cloud-build"
+    fi
+  fi
+  echo "==> --builder auto resolved to '${resolved}' (registry='${REGISTRY:-<unset>}')"
+  BUILDER="${resolved}"
 fi
 
 # Validate target.
