@@ -129,9 +129,22 @@ func write(level, tag, format string, args ...interface{}) {
 
 	// Write to agent.log
 	mu.Lock()
-	// Use more permissive 0666 so that if created as root, it can be written to by others
-	// (subject to directory permissions and umask).
+	// Use more permissive 0666 so that if the file is created by root
+	// (sciontool runs as PID 1 root early in container start, then
+	// drops to the scion user before the harness runs), the later
+	// non-root writers can still append. OpenFile's mode arg is
+	// masked by the process umask (typically 022 → 0644 actual
+	// perms), which previously left agent.log read-only to the scion
+	// user and produced a stream of "permission denied" warnings
+	// once sciontool dropped privileges. Explicit chmod after the
+	// open bypasses the umask so the bits we asked for are the bits
+	// we get. The chmod is best-effort: a non-root writer chmod'ing
+	// a root-owned file fails with EPERM, which is harmless because
+	// the open already succeeded.
 	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
+	if err == nil {
+		_ = os.Chmod(logPath, 0666)
+	}
 	if err != nil {
 		// If we can't write to agent.log, try to fall back to /tmp and enable debug
 		if logPath != "/tmp/agent.log" {
