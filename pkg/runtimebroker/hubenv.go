@@ -36,7 +36,7 @@ var safeEnvLogKeys = map[string]struct{}{
 	"SCION_TELEMETRY_ENABLED": {},
 }
 
-func resolveHubEndpointForCreate(reqHubEndpoint, connectionHubEndpoint, brokerHubEndpoint string, resolvedEnv map[string]string, grovePath, containerHubEndpoint, runtimeName string) string {
+func resolveHubEndpointForCreate(reqHubEndpoint, connectionHubEndpoint, brokerHubEndpoint string, resolvedEnv map[string]string, grovePath, containerHubEndpoint, runtimeName string, connectionIsColocated bool) string {
 	hubEndpoint := reqHubEndpoint
 	if hubEndpoint == "" {
 		hubEndpoint = connectionHubEndpoint
@@ -51,11 +51,21 @@ func resolveHubEndpointForCreate(reqHubEndpoint, connectionHubEndpoint, brokerHu
 		hubEndpoint = hubEndpointFromGroveSettings(grovePath)
 	}
 	// A localhost endpoint from a remote hub dispatch refers to the hub
-	// machine's loopback, not this broker's. When we have a non-localhost
-	// connection endpoint (the URL this broker used to reach the hub),
-	// prefer it since it is known to be reachable from this broker.
-	if isLocalhostEndpoint(hubEndpoint) && connectionHubEndpoint != "" && !isLocalhostEndpoint(connectionHubEndpoint) {
-		hubEndpoint = connectionHubEndpoint
+	// machine's loopback, not this broker's. The connection endpoint (the
+	// URL this broker actually used to reach the hub) is reachable by
+	// definition, so prefer it over a loopback req endpoint.
+	//
+	// This must hold even when the connection endpoint is ITSELF a loopback
+	// relay (e.g. http://127.0.0.1:18181/scion-hub) — the common corp /
+	// reverse-proxy topology — as long as the hub is remote (non-colocated)
+	// and the two differ. The only case where the loopback req endpoint is
+	// correct is a genuinely co-located hub+broker (combo server), where the
+	// container bridge override below maps it to host-gateway; there we leave
+	// it untouched.
+	if isLocalhostEndpoint(hubEndpoint) && connectionHubEndpoint != "" && connectionHubEndpoint != hubEndpoint {
+		if !isLocalhostEndpoint(connectionHubEndpoint) || !connectionIsColocated {
+			hubEndpoint = connectionHubEndpoint
+		}
 	}
 	return applyContainerBridgeOverride(hubEndpoint, containerHubEndpoint, runtimeName)
 }
@@ -120,6 +130,15 @@ func applyContainerBridgeOverride(endpoint, containerHubEndpoint, runtimeName st
 		return containerHubEndpoint
 	}
 	bridgeURL.Host = net.JoinHostPort(bridgeURL.Hostname(), port)
+	// Preserve any mount-prefix path (e.g. /scion-hub) and query from the
+	// endpoint being overridden. containerHubEndpoint only carries host:port,
+	// so without this a reverse-proxy relay endpoint would lose its prefix.
+	if epURL.Path != "" {
+		bridgeURL.Path = epURL.Path
+	}
+	if epURL.RawQuery != "" {
+		bridgeURL.RawQuery = epURL.RawQuery
+	}
 	return bridgeURL.String()
 }
 

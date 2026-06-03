@@ -239,6 +239,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 			in.GrovePath,
 			s.config.ContainerHubEndpoint,
 			runtimeName,
+			hubConn != nil && hubConn.IsColocated,
 		)
 	} else {
 		// Start/restart/finalize path: broker-level and settings fallbacks

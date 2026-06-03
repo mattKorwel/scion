@@ -123,15 +123,16 @@ func TestResolveHubEndpointForCreatePrecedence(t *testing.T) {
 	}
 
 	tests := []struct {
-		name                 string
-		req                  string
-		connection           string
-		broker               string
-		resolved             map[string]string
-		grovePath            string
-		containerHubEndpoint string
-		runtimeName          string
-		want                 string
+		name                  string
+		req                   string
+		connection            string
+		broker                string
+		resolved              map[string]string
+		grovePath             string
+		containerHubEndpoint  string
+		runtimeName           string
+		connectionIsColocated bool
+		want                  string
 	}{
 		{
 			name:       "req endpoint takes priority",
@@ -172,12 +173,28 @@ func TestResolveHubEndpointForCreatePrecedence(t *testing.T) {
 			want:                 "https://hub.remote.example.com",
 		},
 		{
-			name:                 "localhost req kept when connection is also localhost",
-			req:                  "http://localhost:8080",
-			connection:           "http://localhost:9090",
-			containerHubEndpoint: "http://host.containers.internal:9810",
-			runtimeName:          "podman",
-			want:                 "http://host.containers.internal:8080",
+			// Co-located combo server: the loopback req endpoint is correct and
+			// is mapped to the container bridge. Keep it (do not adopt the
+			// colocated loopback connection endpoint).
+			name:                  "localhost req kept when connection is also localhost (colocated)",
+			req:                   "http://localhost:8080",
+			connection:            "http://localhost:9090",
+			containerHubEndpoint:  "http://host.containers.internal:9810",
+			runtimeName:           "podman",
+			connectionIsColocated: true,
+			want:                  "http://host.containers.internal:8080",
+		},
+		{
+			// Reverse-proxy / corp relay: the broker reaches a REMOTE hub
+			// through a loopback relay (e.g. http://127.0.0.1:18181/scion-hub).
+			// The hub's self-reported loopback (localhost:8788) is unreachable
+			// from the agent, so adopt the reachable relay connection endpoint
+			// even though it is itself loopback. (No container bridge here.)
+			name:        "loopback req replaced by loopback relay connection when not colocated",
+			req:         "http://localhost:8788",
+			connection:  "http://127.0.0.1:18181/scion-hub",
+			runtimeName: "podman",
+			want:        "http://127.0.0.1:18181/scion-hub",
 		},
 		{
 			name:                 "localhost req kept when connection is empty",
@@ -210,7 +227,7 @@ func TestResolveHubEndpointForCreatePrecedence(t *testing.T) {
 			if rn == "" {
 				rn = "docker"
 			}
-			got := resolveHubEndpointForCreate(tt.req, tt.connection, tt.broker, tt.resolved, tt.grovePath, tt.containerHubEndpoint, rn)
+			got := resolveHubEndpointForCreate(tt.req, tt.connection, tt.broker, tt.resolved, tt.grovePath, tt.containerHubEndpoint, rn, tt.connectionIsColocated)
 			if got != tt.want {
 				t.Fatalf("resolveHubEndpointForCreate() = %q, want %q", got, tt.want)
 			}
@@ -274,6 +291,13 @@ func TestApplyContainerBridgeOverride(t *testing.T) {
 			containerHubEndpoint: "http://host.containers.internal:9810",
 			runtimeName:          "podman",
 			want:                 "http://host.containers.internal:9810",
+		},
+		{
+			name:                 "mount-prefix path preserved when bridging",
+			endpoint:             "http://localhost:8788/scion-hub",
+			containerHubEndpoint: "http://host.docker.internal:9810",
+			runtimeName:          "docker",
+			want:                 "http://host.docker.internal:8788/scion-hub",
 		},
 	}
 
