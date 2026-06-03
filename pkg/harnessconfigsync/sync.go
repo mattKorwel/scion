@@ -40,18 +40,27 @@ import (
 // signal from transient network errors.
 var ErrNotOnHub = fmt.Errorf("harness-config not found on hub")
 
-// EnsureLocal makes sure a harness-config with the given name is
-// installed locally at ~/.scion/harness-configs/<name>/. If it's
-// already there, the function is a no-op. If not, it fetches the
-// active version from the Hub, verifies each file's hash, and writes
-// the bundle atomically (two-phase: fetch + verify everything before
-// writing anything).
+// EnsureLocal makes sure a harness-config with the given name is installed
+// locally at ~/.scion/harness-configs/<name>/ AND is up to date with the Hub.
+//
+// Behavior:
+//   - Not on disk, present on Hub  -> download + install.
+//   - On disk, matches Hub content -> no-op (return existing path).
+//   - On disk, STALE vs Hub        -> re-download in place (refresh).
+//   - On disk, Hub unreachable     -> return existing path (degraded; a local
+//     copy is better than failing the dispatch).
+//   - On disk, not on Hub          -> return existing path (local-only or
+//     built-in seeded config is authoritative).
+//   - Not on disk, Hub unreachable -> propagate error (retriable).
+//   - Not on disk, not on Hub      -> ErrNotOnHub.
+//
+// The staleness check is what makes `scion harness-config push` actually reach
+// brokers. The previous fast path returned any on-disk copy unconditionally, so
+// a broker served a stale harness-config forever after a push (it never
+// re-pulled). Freshness is determined by the same per-file hash comparison the
+// `harness-config` CLI uses on push (CollectFiles vs the Hub download manifest).
 //
 // Returns the absolute on-disk path to the installed directory.
-//
-// Network errors propagate; the caller is expected to treat them as
-// retriable. ErrNotOnHub is returned only when the Hub explicitly
-// reports no match (an authoritative "no").
 func EnsureLocal(ctx context.Context, hubClient hubclient.Client, name string) (string, error) {
 	if name == "" {
 		return "", fmt.Errorf("harnessconfigsync.EnsureLocal: empty name")
@@ -60,11 +69,12 @@ func EnsureLocal(ctx context.Context, hubClient hubclient.Client, name string) (
 		return "", fmt.Errorf("harnessconfigsync.EnsureLocal: nil hub client")
 	}
 
-	// Fast path: already on disk somewhere reachable by FindHarnessConfigDir.
+	// Is it already on disk somewhere reachable by FindHarnessConfigDir?
 	// We pass an empty grovePath because the broker dispatch path doesn't
 	// know about user-grove dirs — a global install is what we want anyway.
+	localPath := ""
 	if hcDir, err := config.FindHarnessConfigDir(name, ""); err == nil {
-		return hcDir.Path, nil
+		localPath = hcDir.Path
 	}
 
 	// Resolve hub-side metadata. List + filter rather than Get-by-name
@@ -75,6 +85,11 @@ func EnsureLocal(ctx context.Context, hubClient hubclient.Client, name string) (
 		Status: "active",
 	})
 	if err != nil {
+		// Hub unreachable. Prefer an existing local copy over failing the
+		// dispatch; otherwise propagate (the caller treats it as retriable).
+		if localPath != "" {
+			return localPath, nil
+		}
 		return "", fmt.Errorf("hub list: %w", err)
 	}
 
@@ -87,21 +102,78 @@ func EnsureLocal(ctx context.Context, hubClient hubclient.Client, name string) (
 		}
 	}
 	if match == nil {
+		// Not on the hub. A local copy (local-only or built-in seeded) is
+		// authoritative in that case; keep it.
+		if localPath != "" {
+			return localPath, nil
+		}
 		return "", fmt.Errorf("%w: %q", ErrNotOnHub, name)
 	}
 
-	// Resolve install destination: same shape that `scion harness-config
-	// pull` writes to so the next FindHarnessConfigDir call sees it.
-	globalDir, err := config.GetGlobalDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve global dir: %w", err)
+	// Already on disk: refresh only if the content drifted from the Hub.
+	if localPath != "" {
+		fresh, ferr := localMatchesHub(ctx, hubClient, match, localPath)
+		if ferr != nil || fresh {
+			// Either it's up to date, or we couldn't determine freshness
+			// (transient) — in both cases prefer the existing local copy
+			// over a needless or risky re-download.
+			return localPath, nil
+		}
+		// Stale: fall through and re-download into the same directory.
 	}
-	destDir := filepath.Join(globalDir, "harness-configs", match.Name)
+
+	// Resolve install destination. Refresh in place when we already have a
+	// copy; otherwise use the global harness-configs dir (the same shape
+	// `scion harness-config pull` writes to so FindHarnessConfigDir sees it).
+	destDir := localPath
+	if destDir == "" {
+		globalDir, err := config.GetGlobalDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve global dir: %w", err)
+		}
+		destDir = filepath.Join(globalDir, "harness-configs", match.Name)
+	}
 
 	if err := downloadAndInstall(ctx, hubClient, match, destDir); err != nil {
+		// If we were merely refreshing an existing copy, keep serving the
+		// stale-but-usable one rather than failing the dispatch.
+		if localPath != "" {
+			return localPath, nil
+		}
 		return "", err
 	}
 	return destDir, nil
+}
+
+// localMatchesHub reports whether the on-disk harness-config at localDir has the
+// same file set and per-file hashes as the Hub's active version. It mirrors the
+// change-detection the `scion harness-config` CLI performs on push (CollectFiles
+// local hashes vs the Hub download manifest).
+func localMatchesHub(ctx context.Context, hubClient hubclient.Client, hc *hubclient.HarnessConfig, localDir string) (bool, error) {
+	localFiles, err := hubclient.CollectFiles(localDir, nil)
+	if err != nil {
+		return false, err
+	}
+
+	dl, err := hubClient.HarnessConfigs().RequestDownloadURLs(ctx, hc.ID)
+	if err != nil {
+		return false, err
+	}
+
+	remote := make(map[string]string, len(dl.Files))
+	for _, f := range dl.Files {
+		remote[f.Path] = f.Hash
+	}
+	if len(remote) != len(localFiles) {
+		return false, nil
+	}
+	for _, lf := range localFiles {
+		rh, ok := remote[lf.Path]
+		if !ok || rh != lf.Hash {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // downloadAndInstall performs the two-phase download:
