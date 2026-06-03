@@ -34,6 +34,7 @@ func TestNew_BuiltinHarnesses(t *testing.T) {
 		{"gemini", "gemini"},
 		{"opencode", "opencode"},
 		{"codex", "codex"},
+		{"cloudcode", "cloudcode"},
 	}
 
 	for _, tt := range tests {
@@ -114,7 +115,7 @@ func TestNew_PluginHarness(t *testing.T) {
 
 func TestAll_ReturnsBuiltins(t *testing.T) {
 	all := All()
-	assert.Len(t, all, 4)
+	assert.Len(t, all, 5)
 	names := make([]string, len(all))
 	for i, h := range all {
 		names[i] = h.Name()
@@ -123,4 +124,5 @@ func TestAll_ReturnsBuiltins(t *testing.T) {
 	assert.Contains(t, names, "claude")
 	assert.Contains(t, names, "opencode")
 	assert.Contains(t, names, "codex")
+	assert.Contains(t, names, "cloudcode")
 }

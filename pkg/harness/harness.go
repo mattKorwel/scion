@@ -44,6 +44,8 @@ func New(harnessName string) api.Harness {
 		return &OpenCode{}
 	case "codex":
 		return &Codex{}
+	case "cloudcode":
+		return newCloudCode()
 	default:
 		// Check plugin registry before falling back to Generic
 		if pluginManager != nil && pluginManager.HasPlugin(scionplugin.PluginTypeHarness, harnessName) {
@@ -62,5 +64,6 @@ func All() []api.Harness {
 		&ClaudeCode{},
 		&OpenCode{},
 		&Codex{},
+		newCloudCode(),
 	}
 }
