@@ -48,6 +48,9 @@ cloud_build_config_for_target() {
     scion-base) file="cloudbuild-scion-base.yaml" ;;
     harnesses)  file="cloudbuild-harnesses.yaml" ;;
     hub)        file="cloudbuild-hub.yaml" ;;
+    hub-corprun) file="cloudbuild-hub-corprun.yaml" ;;
+    ac)          file="cloudbuild-ac.yaml" ;;
+    corprun)     file="cloudbuild-corprun.yaml" ;;
     *)
       echo "cloud-build: no cloudbuild-*.yaml mapping for target '${target}'" >&2
       return 1

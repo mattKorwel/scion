@@ -44,6 +44,8 @@ ALL_STEP_IDS=(
   scion-gemini
   scion-cloudcode
   scion-hub
+  scion-hub-corprun
+  scion-ac
 )
 
 # All known target names. Used by the orchestrator's --help and --target
@@ -53,6 +55,9 @@ ALL_TARGETS=(
   scion-base
   harnesses
   hub
+  hub-corprun
+  ac
+  corprun
   common
   all
 )
@@ -74,6 +79,17 @@ resolve_targets() {
       ;;
     hub)
       echo scion-hub
+      ;;
+    hub-corprun)
+      echo scion-hub-corprun
+      ;;
+    ac)
+      echo scion-ac
+      ;;
+    corprun)
+      # The go/corp-run pair: Cloud-Run-shaped hub + AC server. Mirrors
+      # cloudbuild-corprun.yaml.
+      printf '%s\n' scion-hub-corprun scion-ac
       ;;
     common)
       printf '%s\n' scion-base scion-gemini scion-cloudcode scion-hub
@@ -103,6 +119,8 @@ step_dockerfile() {
     scion-gemini)    echo "${IMAGE_BUILD_DIR}/gemini/Dockerfile" ;;
     scion-cloudcode) echo "${IMAGE_BUILD_DIR}/cloudcode/Dockerfile" ;;
     scion-hub)       echo "${IMAGE_BUILD_DIR}/hub/Dockerfile" ;;
+    scion-hub-corprun) echo "${IMAGE_BUILD_DIR}/hub-corprun/Dockerfile" ;;
+    scion-ac)        echo "${IMAGE_BUILD_DIR}/ac/Dockerfile" ;;
     *) return 1 ;;
   esac
 }
@@ -119,6 +137,8 @@ step_context_dir() {
     scion-gemini)    echo "${IMAGE_BUILD_DIR}/gemini" ;;
     scion-cloudcode) echo "${IMAGE_BUILD_DIR}/cloudcode" ;;
     scion-hub)       echo "${IMAGE_BUILD_DIR}/hub" ;;
+    scion-hub-corprun) echo "${IMAGE_BUILD_DIR}/hub-corprun" ;;
+    scion-ac)        echo "${IMAGE_BUILD_DIR}/ac" ;;
     *) return 1 ;;
   esac
 }
@@ -146,7 +166,7 @@ step_build_args() {
         echo "GIT_COMMIT=${COMMIT_SHA}"
       fi
       ;;
-    scion-gemini|scion-cloudcode|scion-hub)
+    scion-gemini|scion-cloudcode|scion-hub|scion-hub-corprun|scion-ac)
       echo "BASE_IMAGE=${prefix}scion-base:${BASE_TAG}"
       ;;
     *) return 1 ;;
@@ -162,7 +182,7 @@ step_parent() {
   case "$1" in
     core-base)       echo "" ;;
     scion-base)      echo "core-base" ;;
-    scion-gemini|scion-cloudcode|scion-hub)
+    scion-gemini|scion-cloudcode|scion-hub|scion-hub-corprun|scion-ac)
       echo "scion-base"
       ;;
     *) return 1 ;;
